@@ -4,3 +4,4 @@ plotly
 FinMind
 scipy
 numpy
+tqdm
