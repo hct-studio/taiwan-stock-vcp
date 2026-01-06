@@ -97,79 +97,79 @@ strategy_mode = st.sidebar.radio(
 )
 
 # --- B. Google Sheets 自選股管理 (修正 .0 問題版) ---
+# --- B. Google Sheets 自選股管理 (智慧搜尋版) ---
 st.sidebar.markdown("---")
 st.sidebar.subheader("☁️ 自選股清單 (Google Sheets)")
 
 # 1. 建立連線
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-# 2. 讀取資料並自動補上名稱
+# 2. 準備下拉選單的選項 (格式：2330 台積電)
+# 將 name_map 轉換成一個列表，方便搜尋
+all_stock_options = [f"{k} {v}" for k, v in name_map.items()]
+
+# 3. 讀取目前的清單
 try:
     df_sheet = conn.read(ttl=0)
     
-    # 確保有一欄叫做 stock_id
+    # 資料清洗：轉字串、去尾數 .0、去空白
     if 'stock_id' not in df_sheet.columns:
-        df_sheet = pd.DataFrame({'stock_id': ['2330']})
-    
-    # ★ 關鍵修正 1：先轉字串，再用 Regex 強制移除結尾的 ".0"
-    df_sheet['stock_id'] = df_sheet['stock_id'].astype(str).str.replace(r'\.0$', '', regex=True)
-    
-    # 過濾掉可能是空值產生的 "nan" 字串
-    df_sheet = df_sheet[df_sheet['stock_id'] != 'nan']
-
-    # 自動對照產生名稱
-    df_sheet['stock_name'] = df_sheet['stock_id'].map(name_map).fillna("未知/新股")
+        current_codes = ['2330']
+    else:
+        raw_codes = df_sheet['stock_id'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
+        current_codes = raw_codes[raw_codes != 'nan'].tolist()
 
 except Exception as e:
-    df_sheet = pd.DataFrame({
-        'stock_id': ['2330', '2317', '2603'],
-        'stock_name': ['台積電', '鴻海', '長榮']
-    })
+    current_codes = ['2330'] # 預設值
 
-# 3. 顯示互動式表格
-edited_df = st.sidebar.data_editor(
-    df_sheet, 
-    num_rows="dynamic", 
-    column_config={
-        "stock_id": st.column_config.TextColumn(
-            "股票代號", 
-            help="請輸入代號 (例如 2330)", 
-            required=True,
-            validate=r"^\d+$" # ★ 限制只能輸入數字，避免誤打
-        ),
-        "stock_name": st.column_config.TextColumn(
-            "公司名稱", 
-            disabled=True, 
-            help="自動對照產生"
-        )
-    },
-    key="editor",
-    height=250
+# 4. 將目前的代號 (2330) 轉換成 選單格式 (2330 台積電)
+# 這樣 multiselect 才能正確顯示目前的預設值
+default_options = []
+for code in current_codes:
+    name = name_map.get(code, "未知")
+    # 組合出顯示名稱，如果對照表有就用 "2330 台積電"，沒有就只用 "2330"
+    option_label = f"{code} {name}" if name != "未知" else code
+    
+    # 只有當這個選項真的在我們的選項庫裡，才設為預設值，避免報錯
+    # (如果找不到，我們嘗試從 all_stock_options 找最接近的)
+    if option_label in all_stock_options:
+        default_options.append(option_label)
+    else:
+        # 萬一該股不在對照表(例如新上市)，暫時先不顯示或只顯示代號
+        # 這裡為了防呆，我們只加入有效的選項
+        pass
+
+# 5. 顯示智慧搜尋框 (Multiselect)
+selected_options = st.sidebar.multiselect(
+    "🔍 搜尋或輸入代號/名稱：",
+    options=all_stock_options,
+    default=default_options,
+    placeholder="例如：2330 或 台積電...",
+    help="點擊框框可下拉選擇，或直接打字搜尋"
 )
 
-# 4. 同步按鈕
+# 6. 處理儲存邏輯
 if st.sidebar.button("💾 儲存變更至雲端"):
     try:
-        # ★ 關鍵修正 2：儲存前再次清洗，確保乾淨的整數格式寫入 Google Sheet
-        # 轉字串 -> 去除空白 -> 去除 .0
-        edited_df['stock_id'] = edited_df['stock_id'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
+        # 從選單格式 "2330 台積電" 還原回純代號 "2330"
+        new_codes = [s.split(" ")[0] for s in selected_options]
         
-        # 重新對應名稱 (處理新輸入的股票)
-        edited_df['stock_name'] = edited_df['stock_id'].map(name_map).fillna("未知")
+        # 建立新的 DataFrame
+        new_df = pd.DataFrame({'stock_id': new_codes})
         
-        conn.update(data=edited_df)
-        st.sidebar.success("✅ 已更新！格式已自動修正。")
+        # 寫入 Google Sheet
+        conn.update(data=new_df)
+        st.sidebar.success(f"✅ 已儲存 {len(new_codes)} 檔股票！")
         st.rerun()
     except Exception as e:
         st.sidebar.error(f"儲存失敗: {e}")
 
-# 5. 轉換資料供下方分析使用
-clean_stocks = edited_df['stock_id'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
-clean_stocks = clean_stocks[clean_stocks != 'nan']
-clean_stocks = clean_stocks[clean_stocks != '']
-
-stock_list = clean_stocks.tolist()
-user_input = ",".join(stock_list)
+# 7. 轉換資料供下方分析使用
+# 直接解析使用者目前選的內容 (即使還沒按儲存，這樣可以直接預覽)
+# 但為了邏輯一致，我們還是建議使用者按儲存。
+# 這裡我們使用 selected_options 解析出的代號
+current_selected_codes = [s.split(" ")[0] for s in selected_options]
+user_input = ",".join(current_selected_codes)
 
 
 # --- C. 參數微調區 ---
@@ -262,5 +262,6 @@ if st.button("🔍 執行策略掃描"):
     status_text.empty()
     if not found_any:
         st.warning(f"在「{strategy_mode}」模式下，您的自選股中無符合標的。")
+
 
 
