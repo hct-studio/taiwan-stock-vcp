@@ -5,3 +5,4 @@ FinMind
 scipy
 numpy
 tqdm
+streamlit-gsheets
