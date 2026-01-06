@@ -5,4 +5,5 @@ FinMind
 scipy
 numpy
 tqdm
-streamlit-gsheets
+st-gsheets-connection
+
