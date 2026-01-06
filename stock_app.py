@@ -96,46 +96,77 @@ strategy_mode = st.sidebar.radio(
     ("🔍 VCP 準突破 (量縮價穩)", "📈 均線多頭 (VCP 趨勢)", "🔥 量能爆發 (短線動能)")
 )
 
-# --- B. Google Sheets 自選股管理 ---
+# --- B. Google Sheets 自選股管理 (自動顯示名稱版) ---
 st.sidebar.markdown("---")
 st.sidebar.subheader("☁️ 自選股清單 (Google Sheets)")
 
 # 1. 建立連線
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-# 2. 讀取資料
+# 2. 讀取資料並自動補上名稱
 try:
     df_sheet = conn.read(ttl=0)
-    # 確保資料格式正確
+    
+    # 確保有一欄叫做 stock_id
     if 'stock_id' not in df_sheet.columns:
         df_sheet = pd.DataFrame({'stock_id': ['2330']})
+    
+    # 強制轉為字串格式
     df_sheet['stock_id'] = df_sheet['stock_id'].astype(str)
+    
+    # ★ 關鍵修改：利用 name_map 自動產生/更新「股票名稱」欄位
+    # 如果代號存在於對照表就顯示名稱，否則顯示 "未知"
+    df_sheet['stock_name'] = df_sheet['stock_id'].map(name_map).fillna("未知/新股")
+
 except Exception as e:
-    # st.sidebar.error(f"連線 Google Sheet 失敗: {e}") # Debug 用
-    df_sheet = pd.DataFrame({'stock_id': ['2330', '2317', '2603']})
+    # st.sidebar.error(f"連線失敗: {e}") 
+    # 斷線時的預備資料
+    df_sheet = pd.DataFrame({
+        'stock_id': ['2330', '2317', '2603'],
+        'stock_name': ['台積電', '鴻海', '長榮']
+    })
 
 # 3. 顯示互動式表格
 edited_df = st.sidebar.data_editor(
     df_sheet, 
     num_rows="dynamic", 
     column_config={
-        "stock_id": st.column_config.TextColumn("股票代號", required=True)
+        "stock_id": st.column_config.TextColumn(
+            "股票代號", 
+            help="請輸入代號 (例如 2330)", 
+            required=True
+        ),
+        "stock_name": st.column_config.TextColumn(
+            "公司名稱", 
+            disabled=True,  # ★ 設定為唯讀，不讓使用者手動改，避免改錯
+            help="自動對照產生"
+        )
     },
     key="editor",
-    height=200
+    height=250 # 稍微加高一點方便查看
 )
 
-# 4. 同步按鈕
+# 4. 同步按鈕 (儲存時會一併把名稱寫回 Google Sheet)
 if st.sidebar.button("💾 儲存變更至雲端"):
     try:
+        # 在儲存前，再次確保名稱是最新的 (以防使用者剛輸入新代號，名稱欄還是空的)
+        # 這裡會根據使用者新輸入的 stock_id，重新抓一次名稱
+        edited_df['stock_id'] = edited_df['stock_id'].astype(str).str.strip()
+        edited_df['stock_name'] = edited_df['stock_id'].map(name_map).fillna("未知")
+        
         conn.update(data=edited_df)
-        st.sidebar.success("✅ 已更新 Google Sheet！")
+        st.sidebar.success("✅ 已更新！名稱已自動補全。")
         st.rerun()
     except Exception as e:
         st.sidebar.error(f"儲存失敗: {e}")
 
-# 5. 轉換資料供下方使用
-stock_list = edited_df.iloc[:, 0].astype(str).tolist()
+# 5. 轉換資料供下方分析使用
+# 為了避免讀到空行，做一點資料清洗
+clean_stocks = edited_df['stock_id'].astype(str).str.strip()
+clean_stocks = clean_stocks[clean_stocks != 'nan'] # 移除可能的空值
+clean_stocks = clean_stocks[clean_stocks != '']    # 移除空字串
+
+stock_list = clean_stocks.tolist()
 user_input = ",".join(stock_list)
 
 
@@ -229,3 +260,4 @@ if st.button("🔍 執行策略掃描"):
     status_text.empty()
     if not found_any:
         st.warning(f"在「{strategy_mode}」模式下，您的自選股中無符合標的。")
+
