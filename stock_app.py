@@ -96,7 +96,7 @@ strategy_mode = st.sidebar.radio(
     ("🔍 VCP 準突破 (量縮價穩)", "📈 均線多頭 (VCP 趨勢)", "🔥 量能爆發 (短線動能)")
 )
 
-# --- B. Google Sheets 自選股管理 (自動顯示名稱版) ---
+# --- B. Google Sheets 自選股管理 (修正 .0 問題版) ---
 st.sidebar.markdown("---")
 st.sidebar.subheader("☁️ 自選股清單 (Google Sheets)")
 
@@ -111,16 +111,16 @@ try:
     if 'stock_id' not in df_sheet.columns:
         df_sheet = pd.DataFrame({'stock_id': ['2330']})
     
-    # 強制轉為字串格式
-    df_sheet['stock_id'] = df_sheet['stock_id'].astype(str)
+    # ★ 關鍵修正 1：先轉字串，再用 Regex 強制移除結尾的 ".0"
+    df_sheet['stock_id'] = df_sheet['stock_id'].astype(str).str.replace(r'\.0$', '', regex=True)
     
-    # ★ 關鍵修改：利用 name_map 自動產生/更新「股票名稱」欄位
-    # 如果代號存在於對照表就顯示名稱，否則顯示 "未知"
+    # 過濾掉可能是空值產生的 "nan" 字串
+    df_sheet = df_sheet[df_sheet['stock_id'] != 'nan']
+
+    # 自動對照產生名稱
     df_sheet['stock_name'] = df_sheet['stock_id'].map(name_map).fillna("未知/新股")
 
 except Exception as e:
-    # st.sidebar.error(f"連線失敗: {e}") 
-    # 斷線時的預備資料
     df_sheet = pd.DataFrame({
         'stock_id': ['2330', '2317', '2603'],
         'stock_name': ['台積電', '鴻海', '長榮']
@@ -134,37 +134,39 @@ edited_df = st.sidebar.data_editor(
         "stock_id": st.column_config.TextColumn(
             "股票代號", 
             help="請輸入代號 (例如 2330)", 
-            required=True
+            required=True,
+            validate=r"^\d+$" # ★ 限制只能輸入數字，避免誤打
         ),
         "stock_name": st.column_config.TextColumn(
             "公司名稱", 
-            disabled=True,  # ★ 設定為唯讀，不讓使用者手動改，避免改錯
+            disabled=True, 
             help="自動對照產生"
         )
     },
     key="editor",
-    height=250 # 稍微加高一點方便查看
+    height=250
 )
 
-# 4. 同步按鈕 (儲存時會一併把名稱寫回 Google Sheet)
+# 4. 同步按鈕
 if st.sidebar.button("💾 儲存變更至雲端"):
     try:
-        # 在儲存前，再次確保名稱是最新的 (以防使用者剛輸入新代號，名稱欄還是空的)
-        # 這裡會根據使用者新輸入的 stock_id，重新抓一次名稱
-        edited_df['stock_id'] = edited_df['stock_id'].astype(str).str.strip()
+        # ★ 關鍵修正 2：儲存前再次清洗，確保乾淨的整數格式寫入 Google Sheet
+        # 轉字串 -> 去除空白 -> 去除 .0
+        edited_df['stock_id'] = edited_df['stock_id'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
+        
+        # 重新對應名稱 (處理新輸入的股票)
         edited_df['stock_name'] = edited_df['stock_id'].map(name_map).fillna("未知")
         
         conn.update(data=edited_df)
-        st.sidebar.success("✅ 已更新！名稱已自動補全。")
+        st.sidebar.success("✅ 已更新！格式已自動修正。")
         st.rerun()
     except Exception as e:
         st.sidebar.error(f"儲存失敗: {e}")
 
 # 5. 轉換資料供下方分析使用
-# 為了避免讀到空行，做一點資料清洗
-clean_stocks = edited_df['stock_id'].astype(str).str.strip()
-clean_stocks = clean_stocks[clean_stocks != 'nan'] # 移除可能的空值
-clean_stocks = clean_stocks[clean_stocks != '']    # 移除空字串
+clean_stocks = edited_df['stock_id'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
+clean_stocks = clean_stocks[clean_stocks != 'nan']
+clean_stocks = clean_stocks[clean_stocks != '']
 
 stock_list = clean_stocks.tolist()
 user_input = ",".join(stock_list)
@@ -260,4 +262,5 @@ if st.button("🔍 執行策略掃描"):
     status_text.empty()
     if not found_any:
         st.warning(f"在「{strategy_mode}」模式下，您的自選股中無符合標的。")
+
 
