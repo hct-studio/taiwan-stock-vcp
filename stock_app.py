@@ -4,9 +4,9 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from FinMind.data import DataLoader
 import datetime
-import os
 from scipy.signal import argrelextrema
 import numpy as np
+from streamlit_gsheets import GSheetsConnection
 
 # 初始化數據加載器
 dl = DataLoader()
@@ -42,7 +42,7 @@ def get_volume_column(df):
         if c in cols_lower: return cols_lower[c]
     return None
 
-# --- 4. 繪圖函數：紅漲綠跌版 ---
+# --- 4. 繪圖函數 ---
 def plot_vcp_chart(df, sid, strategy_name=""):
     vol_col = get_volume_column(df)
     df['ma10'] = df['close'].rolling(10).mean()
@@ -86,42 +86,78 @@ def plot_vcp_chart(df, sid, strategy_name=""):
     )
     return fig
 
-# --- 5. UI 與 執行邏輯 ---
-WATCHLIST_FILE = "watchlist.txt"
-def load_watchlist():
-    if os.path.exists(WATCHLIST_FILE):
-        with open(WATCHLIST_FILE, "r", encoding="utf-8") as f: return f.read()
-    return "2330, 2317, 2603, 3035, 3017"
+# --- 5. UI 與 執行邏輯 (整合 Google Sheets) ---
 
-st.sidebar.header("📋 策略設定")
+st.sidebar.header("📋 策略與清單管理")
 
-# 策略選擇器
+# --- A. 策略選擇器 ---
 strategy_mode = st.sidebar.radio(
     "🎯 選擇掃描模式",
     ("🔍 VCP 準突破 (量縮價穩)", "📈 均線多頭 (VCP 趨勢)", "🔥 量能爆發 (短線動能)")
 )
 
-user_input = st.sidebar.text_area("自選股代號", value=load_watchlist(), height=100)
-if st.sidebar.button("💾 儲存清單"):
-    with open(WATCHLIST_FILE, "w", encoding="utf-8") as f: f.write(user_input)
-    st.sidebar.success("儲存成功")
+# --- B. Google Sheets 自選股管理 (取代原本的 text_area) ---
+st.sidebar.markdown("---")
+st.sidebar.subheader("☁️ 自選股清單 (Google Sheets)")
 
-# 參數設定區
+# 1. 建立連線
+conn = st.connection("gsheets", type=GSheetsConnection)
+
+# 2. 讀取資料
+try:
+    df_sheet = conn.read(ttl=0)
+    # 確保資料格式正確 (轉為字串以免股票代號 0050 變成 50)
+    if 'stock_id' not in df_sheet.columns:
+        df_sheet = pd.DataFrame({'stock_id': ['2330']})
+    df_sheet['stock_id'] = df_sheet['stock_id'].astype(str)
+except Exception as e:
+    st.sidebar.error("連線 Google Sheet 失敗，使用預設值")
+    df_sheet = pd.DataFrame({'stock_id': ['2330', '2317', '2603']})
+
+# 3. 顯示互動式表格
+edited_df = st.sidebar.data_editor(
+    df_sheet, 
+    num_rows="dynamic", 
+    column_config={
+        "stock_id": st.column_config.TextColumn("股票代號", required=True)
+    },
+    key="editor",
+    height=200 # 限制表格高度以免佔滿側邊欄
+)
+
+# 4. 同步按鈕
+if st.sidebar.button("💾 儲存變更至雲端"):
+    try:
+        conn.update(data=edited_df)
+        st.sidebar.success("✅ 已更新 Google Sheet！")
+        st.rerun() # 重新整理以確保邏輯讀到最新資料
+    except Exception as e:
+        st.sidebar.error(f"儲存失敗: {e}")
+
+# 5. 轉換資料供下方使用
+# 取得 stock_id 欄位並轉成 list
+stock_list = edited_df.iloc[:, 0].astype(str).tolist()
+# 為了相容原本的程式邏輯，轉成逗號分隔字串
+# (這裡直接轉成 list 也可以，但為了不大幅改動下方邏輯，我們先轉字串再 split)
+user_input = ",".join(stock_list)
+
+
+# --- C. 參數微調區 ---
+st.sidebar.markdown("---")
 vol_factor = 2.0
-consolidation_days = 10  # 預設檢查過去幾天是否價穩
-price_tightness = 0.08   # 預設振幅 8% 以內
+consolidation_days = 10
+price_tightness = 0.08
 
 if "VCP 準突破" in strategy_mode:
-    st.sidebar.markdown("### 🛠 準突破參數微調")
-    consolidation_days = st.sidebar.slider("觀察天數 (T)", 5, 20, 10)
+    st.sidebar.markdown("### 🛠 準突破參數")
+    consolidation_days = st.sidebar.slider("觀察天數", 5, 20, 10)
     price_tightness = st.sidebar.slider("振幅上限 (%)", 3.0, 15.0, 8.0, step=0.5) / 100
-    st.sidebar.info(f"篩選邏輯：\n1. 股價位於200MA之上 (長多)\n2. 近{consolidation_days}天振幅 < {price_tightness*100}%\n3. 近{consolidation_days}天量縮 (小於均量)")
-
 elif "量能" in strategy_mode:
     vol_factor = st.sidebar.slider("量能倍數門檻", 1.5, 5.0, 2.0, step=0.1)
 
-# 執行掃描
+# --- D. 執行掃描 (主邏輯) ---
 if st.button("🔍 執行策略掃描"):
+    # 解析 user_input (從 Google Sheet 來的)
     stocks = [s.strip() for s in user_input.split(",") if s.strip()]
     start_date = (datetime.datetime.now() - datetime.timedelta(days=400)).strftime('%Y-%m-%d')
     
@@ -131,84 +167,3 @@ if st.button("🔍 執行策略掃描"):
 
     for i, sid in enumerate(stocks):
         sname = name_map.get(sid, "")
-        status_text.text(f"正在分析: {sid} {sname}...")
-        try:
-            df = dl.taiwan_stock_daily(stock_id=sid, start_date=start_date)
-            if df.empty or len(df) < 120: continue
-            df.columns = [c.lower() for c in df.columns]
-            
-            vol_col = get_volume_column(df)
-            if not vol_col: continue
-            
-            # 基礎指標計算
-            ma20 = df['close'].rolling(20).mean().iloc[-1]
-            ma50 = df['close'].rolling(50).mean().iloc[-1]
-            ma200 = df['close'].rolling(200).mean().iloc[-1]
-            price = df['close'].iloc[-1]
-            
-            # 成交量計算
-            avg_vol_20 = df[vol_col].iloc[-21:-1].mean()
-            curr_vol = df[vol_col].iloc[-1]
-            vol_ratio = curr_vol / avg_vol_20 if avg_vol_20 > 0 else 0
-
-            is_match = False
-            match_reason = ""
-            details = ""
-
-            # --- 策略 1: VCP 準突破 (量縮價穩 - 抓轉折) ---
-            if "VCP 準突破" in strategy_mode:
-                # 1. 取得近 N 天的資料
-                recent_df = df.iloc[-consolidation_days:]
-                recent_high = recent_df['close'].max()
-                recent_low = recent_df['close'].min()
-                
-                # 2. 計算振幅 (Tightness)
-                amplitude = (recent_high - recent_low) / recent_low
-                
-                # 3. 計算近期量能狀態 (是否量縮)
-                recent_avg_vol = recent_df[vol_col].mean()
-                # 定義量縮：近N天均量 < 60天長均量 OR 今日量 < 20日均量
-                long_avg_vol = df[vol_col].iloc[-60:].mean()
-                is_vol_dry = (recent_avg_vol < long_avg_vol) or (curr_vol < avg_vol_20)
-
-                # 4. 條件判斷
-                # A. 股價要在 200MA 上方 (確保不是空頭接刀)
-                # B. 振幅極小 (在盤整)
-                # C. 量縮 (沒有賣壓)
-                if price > ma200 and amplitude <= price_tightness and is_vol_dry:
-                    is_match = True
-                    match_reason = "量縮價穩 (Pivot Point)"
-                    details = f"近{consolidation_days}日振幅: {round(amplitude*100, 1)}% | 量縮中"
-
-            # --- 策略 2: 均線多頭 (趨勢) ---
-            elif "均線多頭" in strategy_mode:
-                if price > ma50 and ma50 > ma200:
-                    is_match = True
-                    match_reason = "均線多頭排列"
-                    details = f"現價: {price} > 50MA: {round(ma50, 2)}"
-
-            # --- 策略 3: 量能爆發 (動能) ---
-            elif "量能爆發" in strategy_mode:
-                if vol_ratio >= vol_factor:
-                    is_match = True
-                    match_reason = "爆大量"
-                    details = f"量能放大: {round(vol_ratio, 2)}倍"
-
-            # 顯示結果
-            if is_match:
-                found_any = True
-                display_label = f"✅ {sid} {sname} | {match_reason}"
-                
-                with st.expander(display_label, expanded=True):
-                    st.markdown(f"**分析細節:** {details}")
-                    fig = plot_vcp_chart(df, sid, strategy_mode)
-                    st.plotly_chart(fig, use_container_width=True)
-
-        except Exception as e:
-            # st.error(f"{sid} 處理出錯: {e}") # Debug用，平常可註解
-            pass
-        progress_bar.progress((i + 1) / len(stocks))
-    
-    status_text.empty()
-    if not found_any:
-        st.warning(f"在「{strategy_mode}」模式下，查無符合標的。")
