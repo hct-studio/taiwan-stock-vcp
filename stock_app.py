@@ -12,7 +12,14 @@ from streamlit_gsheets import GSheetsConnection
 dl = DataLoader()
 
 st.set_page_config(page_title="台股 VCP 專業監控", layout="wide")
-st.title("🏹 台股 VCP 型態與量能深度分析")
+st.markdown(
+    """
+    <h3 style='text-align: left; font-size: 28px; margin-bottom: 20px;'>
+    🏹 台股 VCP 型態與量能深度分析
+    </h3>
+    """, 
+    unsafe_allow_html=True
+)
 
 # --- 1. 名稱對照表功能 ---
 @st.cache_data
@@ -267,6 +274,7 @@ if st.button("🔍 執行策略掃描"):
     status_text.empty()
     if not found_any:
         st.warning(f"在「{strategy_mode}」模式下，您的自選股中無符合標的。")
+
 
 
 
