@@ -98,76 +98,81 @@ strategy_mode = st.sidebar.radio(
 
 # --- B. Google Sheets 自選股管理 (修正 .0 問題版) ---
 # --- B. Google Sheets 自選股管理 (智慧搜尋版) ---
+# --- B. Google Sheets 自選股管理 (緊湊清單 + 摺疊編輯) ---
 st.sidebar.markdown("---")
-st.sidebar.subheader("☁️ 自選股清單 (Google Sheets)")
+st.sidebar.subheader("☁️ 自選股清單")
 
 # 1. 建立連線
 conn = st.connection("gsheets", type=GSheetsConnection)
-
-# 2. 準備下拉選單的選項 (格式：2330 台積電)
-# 將 name_map 轉換成一個列表，方便搜尋
 all_stock_options = [f"{k} {v}" for k, v in name_map.items()]
 
-# 3. 讀取目前的清單
+# 2. 讀取目前的清單
 try:
     df_sheet = conn.read(ttl=0)
-    
-    # 資料清洗：轉字串、去尾數 .0、去空白
     if 'stock_id' not in df_sheet.columns:
         current_codes = ['2330']
     else:
+        # 資料清洗
         raw_codes = df_sheet['stock_id'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
         current_codes = raw_codes[raw_codes != 'nan'].tolist()
-
 except Exception as e:
-    current_codes = ['2330'] # 預設值
+    current_codes = ['2330']
 
-# 4. 將目前的代號 (2330) 轉換成 選單格式 (2330 台積電)
-# 這樣 multiselect 才能正確顯示目前的預設值
+# 3. 準備預設選項 (還原成 "2330 台積電" 格式)
 default_options = []
+display_data = [] # 用於製作乾淨表格的數據
+
 for code in current_codes:
     name = name_map.get(code, "未知")
-    # 組合出顯示名稱，如果對照表有就用 "2330 台積電"，沒有就只用 "2330"
-    option_label = f"{code} {name}" if name != "未知" else code
+    label = f"{code} {name}"
     
-    # 只有當這個選項真的在我們的選項庫裡，才設為預設值，避免報錯
-    # (如果找不到，我們嘗試從 all_stock_options 找最接近的)
-    if option_label in all_stock_options:
-        default_options.append(option_label)
-    else:
-        # 萬一該股不在對照表(例如新上市)，暫時先不顯示或只顯示代號
-        # 這裡為了防呆，我們只加入有效的選項
-        pass
+    # 準備給編輯器的選項
+    if label in all_stock_options:
+        default_options.append(label)
+    
+    # 準備給展示表格的數據
+    display_data.append({"代號": code, "名稱": name})
 
-# 5. 顯示智慧搜尋框 (Multiselect)
-selected_options = st.sidebar.multiselect(
-    "🔍 搜尋或輸入代號/名稱：",
-    options=all_stock_options,
-    default=default_options,
-    placeholder="例如：2330 或 台積電...",
-    help="點擊框框可下拉選擇，或直接打字搜尋"
-)
+# --- 介面優化重點 ---
 
-# 6. 處理儲存邏輯
-if st.sidebar.button("💾 儲存變更至雲端"):
-    try:
-        # 從選單格式 "2330 台積電" 還原回純代號 "2330"
-        new_codes = [s.split(" ")[0] for s in selected_options]
-        
-        # 建立新的 DataFrame
-        new_df = pd.DataFrame({'stock_id': new_codes})
-        
-        # 寫入 Google Sheet
-        conn.update(data=new_df)
-        st.sidebar.success(f"✅ 已儲存 {len(new_codes)} 檔股票！")
-        st.rerun()
-    except Exception as e:
-        st.sidebar.error(f"儲存失敗: {e}")
+# 4. 區塊一：顯示乾淨的清單 (Read Only)
+# 計算目前數量
+count = len(display_data)
+st.sidebar.caption(f"目前監控：{count} 檔標的")
 
-# 7. 轉換資料供下方分析使用
-# 直接解析使用者目前選的內容 (即使還沒按儲存，這樣可以直接預覽)
-# 但為了邏輯一致，我們還是建議使用者按儲存。
-# 這裡我們使用 selected_options 解析出的代號
+if display_data:
+    st.sidebar.dataframe(
+        pd.DataFrame(display_data),
+        hide_index=True,
+        use_container_width=True,
+        height=min(35 * (count + 1), 300) # 動態調整高度，最多300px
+    )
+else:
+    st.sidebar.info("尚未加入任何股票")
+
+# 5. 區塊二：編輯區 (藏在摺疊選單內，避免雜亂)
+with st.sidebar.expander("✏️ 點此新增 / 刪除股票"):
+    selected_options = st.multiselect(
+        "搜尋股票：",
+        options=all_stock_options,
+        default=default_options,
+        placeholder="輸入代號或名稱...",
+        label_visibility="collapsed" # 隱藏標題讓畫面更緊湊
+    )
+
+    # 儲存按鈕放在編輯區裡面
+    if st.button("💾 儲存修改", type="primary", use_container_width=True):
+        try:
+            new_codes = [s.split(" ")[0] for s in selected_options]
+            new_df = pd.DataFrame({'stock_id': new_codes})
+            conn.update(data=new_df)
+            st.success("已更新！")
+            st.rerun()
+        except Exception as e:
+            st.error(f"失敗: {e}")
+
+# 6. 轉換資料供下方分析使用
+# 優先使用編輯器內的狀態 (讓使用者在儲存前能預覽變化)
 current_selected_codes = [s.split(" ")[0] for s in selected_options]
 user_input = ",".join(current_selected_codes)
 
@@ -262,6 +267,7 @@ if st.button("🔍 執行策略掃描"):
     status_text.empty()
     if not found_any:
         st.warning(f"在「{strategy_mode}」模式下，您的自選股中無符合標的。")
+
 
 
 
