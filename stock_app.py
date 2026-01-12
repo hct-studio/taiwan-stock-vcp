@@ -210,7 +210,16 @@ if st.button("🔍 執行策略掃描"):
         try:
             # 1. 抓股價資料
             df = dl.taiwan_stock_daily(stock_id=sid, start_date=start_date)
-            if df.empty or len(df) < 120: continue
+            
+            # --- Debug 檢查區 ---
+            if df.empty:
+                st.write(f"⚠️ {sid}: 抓不到資料 (請確認代號是否正確)")
+                continue
+            if len(df) < 120:
+                st.write(f"⚠️ {sid}: 資料不足 120 天 (新股?)")
+                continue
+            # --------------------
+
             df.columns = [c.lower() for c in df.columns]
             
             vol_col = get_volume_column(df)
@@ -321,3 +330,4 @@ if st.button("🔍 執行策略掃描"):
     status_text.empty()
     if not found_any:
         st.warning(f"在「{strategy_mode}」模式下，您的自選股中無符合標的。")
+
