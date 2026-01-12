@@ -76,7 +76,7 @@ def plot_vcp_chart(df, sid, strategy_name=""):
         increasing_line_color='red', decreasing_line_color='green'
     ), row=1, col=1)
 
-    # 繪製均線 (根據策略需求顯示重要均線)
+    # 繪製均線
     fig.add_trace(go.Scatter(x=plot_df['date'], y=plot_df['ma5'], line=dict(color='purple', width=1), name="MA5"), row=1, col=1)
     fig.add_trace(go.Scatter(x=plot_df['date'], y=plot_df['ma20'], line=dict(color='orange', width=1.5), name="MA20"), row=1, col=1)
     fig.add_trace(go.Scatter(x=plot_df['date'], y=plot_df['ma60'], line=dict(color='blue', width=1.5), name="MA60"), row=1, col=1)
@@ -101,12 +101,13 @@ def plot_vcp_chart(df, sid, strategy_name=""):
 
 st.sidebar.header("📋 策略與清單管理")
 
-# --- A. 策略選擇器 (新增第四個選項) ---
+# --- A. 策略選擇器 ---
 strategy_mode = st.sidebar.radio(
     "🎯 選擇掃描模式",
     (
         "🔍 VCP 準突破 (量縮價穩)", 
-        "🚀 四線合一+爆量 (強勢起漲)",  # <--- 新增的策略
+        "🚀 四線合一+爆量 (強勢起漲)",
+        "💰 價值低估 (PE < 20)",  # <--- 新增的選項
         "📈 均線多頭 (VCP 趨勢)", 
         "🔥 量能爆發 (短線動能)"
     )
@@ -116,11 +117,9 @@ strategy_mode = st.sidebar.radio(
 st.sidebar.markdown("---")
 st.sidebar.subheader("☁️ 自選股清單")
 
-# 1. 建立連線
 conn = st.connection("gsheets", type=GSheetsConnection)
 all_stock_options = [f"{k} {v}" for k, v in name_map.items()]
 
-# 2. 讀取目前的清單
 try:
     df_sheet = conn.read(ttl=0)
     if 'stock_id' not in df_sheet.columns:
@@ -131,7 +130,6 @@ try:
 except Exception as e:
     current_codes = ['2330']
 
-# 3. 準備預設選項
 default_options = []
 display_data = [] 
 
@@ -142,7 +140,6 @@ for code in current_codes:
         default_options.append(label)
     display_data.append({"代號": code, "名稱": name})
 
-# 4. 顯示清單
 count = len(display_data)
 st.sidebar.caption(f"目前監控：{count} 檔標的")
 
@@ -156,7 +153,6 @@ if display_data:
 else:
     st.sidebar.info("尚未加入任何股票")
 
-# 5. 編輯區
 with st.sidebar.expander("✏️ 點此新增 / 刪除股票"):
     selected_options = st.multiselect(
         "搜尋股票：",
@@ -185,6 +181,7 @@ st.sidebar.markdown("---")
 vol_factor = 2.0
 consolidation_days = 10
 price_tightness = 0.08
+pe_limit = 20.0 # 預設本益比
 
 if "VCP 準突破" in strategy_mode:
     st.sidebar.markdown("### 🛠 準突破參數")
@@ -192,14 +189,17 @@ if "VCP 準突破" in strategy_mode:
     price_tightness = st.sidebar.slider("振幅上限 (%)", 3.0, 15.0, 8.0, step=0.5) / 100
 elif "量能" in strategy_mode:
     vol_factor = st.sidebar.slider("量能倍數門檻", 1.5, 5.0, 2.0, step=0.1)
-elif "四線合一" in strategy_mode: # <--- 新策略的參數說明
-    st.sidebar.info("篩選條件：\n1. 今日量 > (月均量 x 2倍)\n2. 收盤價 > 5日、10日、20日、60日均線")
+elif "價值低估" in strategy_mode:
+    pe_limit = st.sidebar.slider("本益比 (PE) 上限", 10, 50, 20)
+    st.sidebar.info(f"篩選邏輯：\n1. 統計近4季(12個月)EPS總和\n2. 本益比 < {pe_limit}\n3. EPS > 0 (排除虧損)")
 
 # --- D. 執行掃描 ---
 if st.button("🔍 執行策略掃描"):
     stocks = [s.strip() for s in user_input.split(",") if s.strip()]
     start_date = (datetime.datetime.now() - datetime.timedelta(days=400)).strftime('%Y-%m-%d')
-    
+    # 財報搜尋需要更早的日期 (確保抓得到前4季)
+    fin_start_date = (datetime.datetime.now() - datetime.timedelta(days=600)).strftime('%Y-%m-%d')
+
     progress_bar = st.progress(0)
     status_text = st.empty()
     found_any = False
@@ -208,6 +208,7 @@ if st.button("🔍 執行策略掃描"):
         sname = name_map.get(sid, "")
         status_text.text(f"正在分析: {sid} {sname}...")
         try:
+            # 1. 抓股價資料
             df = dl.taiwan_stock_daily(stock_id=sid, start_date=start_date)
             if df.empty or len(df) < 120: continue
             df.columns = [c.lower() for c in df.columns]
@@ -215,17 +216,17 @@ if st.button("🔍 執行策略掃描"):
             vol_col = get_volume_column(df)
             if not vol_col: continue
             
-            # 計算所有需要的均線
+            price = df['close'].iloc[-1]
+            
+            # --- 基礎變數計算 (部分策略共用) ---
             ma5 = df['close'].rolling(5).mean().iloc[-1]
             ma10 = df['close'].rolling(10).mean().iloc[-1]
             ma20 = df['close'].rolling(20).mean().iloc[-1]
             ma50 = df['close'].rolling(50).mean().iloc[-1]
             ma60 = df['close'].rolling(60).mean().iloc[-1]
             ma200 = df['close'].rolling(200).mean().iloc[-1]
-            price = df['close'].iloc[-1]
             
-            # 成交量相關計算
-            avg_vol_20 = df[vol_col].iloc[-21:-1].mean() # 月均量 (前20日)
+            avg_vol_20 = df[vol_col].iloc[-21:-1].mean()
             curr_vol = df[vol_col].iloc[-1]
             vol_ratio = curr_vol / avg_vol_20 if avg_vol_20 > 0 else 0
 
@@ -249,12 +250,9 @@ if st.button("🔍 執行策略掃描"):
                     match_reason = "量縮價穩 (Pivot Point)"
                     details = f"近{consolidation_days}日振幅: {round(amplitude*100, 1)}% | 量縮中"
 
-            # --- 策略 2: 四線合一 + 爆量 (新策略) ---
+            # --- 策略 2: 四線合一 ---
             elif "四線合一" in strategy_mode:
-                # 條件A: 爆量 (大於月均量 2 倍)
                 is_volume_up = vol_ratio >= 2.0
-                
-                # 條件B: 站上所有均線 (5, 10, 20, 60)
                 is_above_ma = (price > ma5) and (price > ma10) and (price > ma20) and (price > ma60)
                 
                 if is_volume_up and is_above_ma:
@@ -262,14 +260,46 @@ if st.button("🔍 執行策略掃描"):
                     match_reason = "🚀 強勢起漲 (爆量站上均線)"
                     details = f"量能: {round(vol_ratio, 2)}倍 | 站上 5/10/20/60MA"
 
-            # --- 策略 3: 均線多頭 ---
+            # --- 策略 3: 價值低估 (PE < 20) [新增] ---
+            elif "價值低估" in strategy_mode:
+                # 只有在這個模式下，才去抓財報資料 (節省時間)
+                try:
+                    df_fin = dl.taiwan_stock_financial_statements(
+                        stock_id=sid, 
+                        start_date=fin_start_date
+                    )
+                    # 篩選 EPS (FinMind 的 type 通常是 'BasicEarningsPerShare')
+                    df_eps = df_fin[df_fin['type'].str.contains('BasicEarningsPerShare', na=False)].copy()
+                    
+                    # 排序並取最近4季
+                    df_eps = df_eps.sort_values('date')
+                    if len(df_eps) >= 4:
+                        last_4_q = df_eps.tail(4)
+                        ttm_eps = last_4_q['value'].sum()
+                        
+                        # 檢查：賺錢才算 PE
+                        if ttm_eps > 0:
+                            pe_ratio = price / ttm_eps
+                            if pe_ratio < pe_limit:
+                                is_match = True
+                                match_reason = f"本益比 {round(pe_ratio, 2)}倍"
+                                
+                                # 製作細節字串：顯示近4季累計區間
+                                q_start = last_4_q['date'].iloc[0]
+                                q_end = last_4_q['date'].iloc[-1]
+                                details = f"近四季EPS合計: {round(ttm_eps, 2)} 元 ({q_start} ~ {q_end})"
+                except Exception as ex:
+                    # 財報抓取失敗或資料不足，就跳過
+                    pass
+
+            # --- 策略 4: 均線多頭 ---
             elif "均線多頭" in strategy_mode:
                 if price > ma50 and ma50 > ma200:
                     is_match = True
                     match_reason = "均線多頭排列"
                     details = f"現價: {price} > 50MA: {round(ma50, 2)}"
 
-            # --- 策略 4: 量能爆發 ---
+            # --- 策略 5: 量能爆發 ---
             elif "量能爆發" in strategy_mode:
                 if vol_ratio >= vol_factor:
                     is_match = True
