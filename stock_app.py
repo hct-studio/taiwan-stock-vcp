@@ -270,7 +270,7 @@ if st.button("🔍 執行策略掃描"):
         status_text.text(f"正在分析 ({i+1}/{len(stocks)}): {sid} {sname}...")
         
         # ★ 關鍵修改：強制休息 1.2 秒，避免被 API 封鎖
-        time.sleep(1.2) 
+        time.sleep(0.5) 
 
         try:
             # 1. 抓股價資料
@@ -387,3 +387,4 @@ if st.button("🔍 執行策略掃描"):
     status_text.empty()
     if not found_any:
         st.warning(f"在「{strategy_mode}」模式下，您的自選股中無符合標的。")
+
