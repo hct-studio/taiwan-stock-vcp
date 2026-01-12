@@ -7,9 +7,20 @@ import datetime
 from scipy.signal import argrelextrema
 import numpy as np
 from streamlit_gsheets import GSheetsConnection
+import time # <--- 新增時間模組，用來控制速度
 
-# 初始化數據加載器
+# --- 1. 初始化數據加載器與 Token 設定 ---
 dl = DataLoader()
+
+# 嘗試從 Secrets 讀取 FinMind Token (如果有設定的話)
+# 這樣可以大幅提高流量限制，避免抓不到資料
+try:
+    if "FINMIND_API_TOKEN" in st.secrets:
+        token = st.secrets["FINMIND_API_TOKEN"]
+        dl.login_by_token(api_token=token)
+        # st.toast("✅ 已載入 FinMind Token，解除流量限制")
+except:
+    pass # 沒設定也沒關係，就用慢速模式
 
 st.set_page_config(page_title="台股 VCP 專業監控", layout="wide")
 
@@ -17,13 +28,13 @@ st.set_page_config(page_title="台股 VCP 專業監控", layout="wide")
 st.markdown(
     """
     <h3 style='text-align: left; font-size: 24px; font-weight: bold; margin-bottom: 15px;'>
-    🏹 台股 VCP 型態與量能深度分析 (除錯模式)
+    🏹 台股 VCP 型態與量能深度分析 (穩定版)
     </h3>
     """, 
     unsafe_allow_html=True
 )
 
-# --- 1. 名稱對照表功能 ---
+# --- 2. 名稱對照表功能 ---
 @st.cache_data
 def get_stock_name_map():
     try:
@@ -34,14 +45,14 @@ def get_stock_name_map():
 
 name_map = get_stock_name_map()
 
-# --- 2. 核心計算：自動偵測收縮點 ---
+# --- 3. 核心計算：自動偵測收縮點 ---
 def find_vcp_points(df):
     prices = df['close'].values
     high_idx = argrelextrema(prices, np.greater, order=5)[0]
     low_idx = argrelextrema(prices, np.less, order=5)[0]
     return high_idx, low_idx
 
-# --- 3. 輔助功能：自動偵測成交量欄位 ---
+# --- 4. 輔助功能：自動偵測成交量欄位 ---
 def get_volume_column(df):
     candidates = ['volume', 'trading_volume', '成交股數', '成交張數']
     for c in candidates:
@@ -51,13 +62,14 @@ def get_volume_column(df):
         if c in cols_lower: return cols_lower[c]
     return None
 
-# --- 4. 繪圖函數 ---
+# --- 5. 繪圖函數 ---
 def plot_vcp_chart(df, sid, strategy_name=""):
     vol_col = get_volume_column(df)
     df['ma5'] = df['close'].rolling(5).mean()
     df['ma10'] = df['close'].rolling(10).mean()
-    df['ma20'] = df['close'].rolling(200).mean() # 這裡修正為 MA200 用於VCP判斷
+    df['ma20'] = df['close'].rolling(20).mean()
     df['ma60'] = df['close'].rolling(60).mean()
+    df['ma200'] = df['close'].rolling(200).mean()
     
     plot_df = df.iloc[-120:].copy().reset_index(drop=True)
     high_idx, low_idx = find_vcp_points(plot_df)
@@ -78,7 +90,7 @@ def plot_vcp_chart(df, sid, strategy_name=""):
 
     # 繪製均線
     fig.add_trace(go.Scatter(x=plot_df['date'], y=plot_df['ma5'], line=dict(color='purple', width=1), name="MA5"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=plot_df['date'], y=plot_df['ma20'], line=dict(color='orange', width=1.5), name="MA20/200"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=plot_df['date'], y=plot_df['ma20'], line=dict(color='orange', width=1.5), name="MA20"), row=1, col=1)
     fig.add_trace(go.Scatter(x=plot_df['date'], y=plot_df['ma60'], line=dict(color='blue', width=1.5), name="MA60"), row=1, col=1)
 
     # 標註點
@@ -97,7 +109,7 @@ def plot_vcp_chart(df, sid, strategy_name=""):
     )
     return fig
 
-# --- 5. UI 與 執行邏輯 ---
+# --- 6. UI 與 執行邏輯 ---
 
 st.sidebar.header("📋 策略與清單管理")
 
@@ -125,7 +137,7 @@ try:
     if 'stock_id' not in df_sheet.columns:
         current_codes = ['2330']
     else:
-        # ★ 強力清洗：讀取時就去除 .TW 和 .0
+        # ★ 強力清洗：確保代號格式正確
         raw_codes = df_sheet['stock_id'].astype(str).str.upper().str.strip()
         raw_codes = raw_codes.str.replace(r'\.TW$', '', regex=True)
         raw_codes = raw_codes.str.replace(r'\.TWO$', '', regex=True)
@@ -138,7 +150,7 @@ default_options = []
 display_data = [] 
 
 for code in current_codes:
-    if not code: continue # 跳過空值
+    if not code: continue 
     name = name_map.get(code, "未知")
     label = f"{code} {name}"
     if label in all_stock_options:
@@ -177,7 +189,7 @@ with st.sidebar.expander("✏️ 點此新增 / 刪除股票"):
         except Exception as e:
             st.error(f"失敗: {e}")
 
-# --- 新增：批次匯入功能 (強效清洗版) ---
+# --- 批次匯入功能 ---
 with st.sidebar.expander("📥 批次匯入 (大量貼上)"):
     import_text = st.text_area(
         "貼上股票代號 (支援 .TW / .0 格式自動清洗)：", 
@@ -192,18 +204,16 @@ with st.sidebar.expander("📥 批次匯入 (大量貼上)"):
             for c in raw_list:
                 c = c.strip().upper()
                 if not c: continue
-                # 移除 .TW 或 .TWO
                 c = c.replace(".TW", "").replace(".TWO", "")
-                # 移除 .0
                 if c.endswith(".0"): c = c[:-2]
                 if c.isdigit(): clean_codes.append(c)
             
-            clean_codes = list(set(clean_codes)) # 去重
+            clean_codes = list(set(clean_codes))
 
             if clean_codes:
                 new_df = pd.DataFrame({'stock_id': clean_codes})
                 conn.update(data=new_df)
-                st.success(f"成功匯入 {len(clean_codes)} 檔股票！(已自動過濾格式錯誤)")
+                st.success(f"成功匯入 {len(clean_codes)} 檔股票！")
                 st.rerun()
             else:
                 st.warning("未偵測到有效的股票代號")
@@ -233,7 +243,6 @@ elif "價值低估" in strategy_mode:
 
 # --- D. 執行掃描 ---
 if st.button("🔍 執行策略掃描"):
-    # ★ 終極清洗：確保送進迴圈的代號絕對乾淨
     raw_stocks = [s.strip().upper() for s in user_input.split(",") if s.strip()]
     stocks = []
     for s in raw_stocks:
@@ -241,11 +250,10 @@ if st.button("🔍 執行策略掃描"):
         if s.endswith(".0"): s = s[:-2]
         if s.isdigit(): stocks.append(s)
     
-    # ★ 顯示診斷訊息
     if not stocks:
-        st.error("❌ 錯誤：沒有讀到任何有效的股票代號。請檢查自選股清單是否為空？")
+        st.error("❌ 錯誤：沒有讀到任何有效的股票代號。")
     else:
-        st.info(f"✅ 系統已讀取 {len(stocks)} 檔股票，正在掃描中... (前3檔: {stocks[:3]})")
+        st.info(f"✅ 系統已讀取 {len(stocks)} 檔股票，正在分析中... (每檔間隔 1.2 秒以防斷線)")
 
     start_date = (datetime.datetime.now() - datetime.timedelta(days=400)).strftime('%Y-%m-%d')
     fin_start_date = (datetime.datetime.now() - datetime.timedelta(days=600)).strftime('%Y-%m-%d')
@@ -254,30 +262,33 @@ if st.button("🔍 執行策略掃描"):
     status_text = st.empty()
     found_any = False
     
-    # 建立一個容器來顯示失敗的股票 (避免佔版面)
     error_log = st.expander("⚠️ 點此查看資料抓取失敗的股票 (除錯用)")
     error_msgs = []
 
     for i, sid in enumerate(stocks):
         sname = name_map.get(sid, "")
         status_text.text(f"正在分析 ({i+1}/{len(stocks)}): {sid} {sname}...")
+        
+        # ★ 關鍵修改：強制休息 1.2 秒，避免被 API 封鎖
+        time.sleep(1.2) 
+
         try:
             # 1. 抓股價資料
             df = dl.taiwan_stock_daily(stock_id=sid, start_date=start_date)
             
             # --- Debug 檢查區 ---
             if df.empty:
-                error_msgs.append(f"❌ {sid}: FinMind 回傳空資料 (請檢查代號是否正確)")
+                error_msgs.append(f"❌ {sid}: FinMind 回傳空資料 (可能流量超限或代號錯誤)")
                 continue
             if len(df) < 120:
-                error_msgs.append(f"⚠️ {sid}: 資料筆數不足 ({len(df)}筆) - 可能是新股")
+                error_msgs.append(f"⚠️ {sid}: 資料不足 120 筆")
                 continue
             # --------------------
 
             df.columns = [c.lower() for c in df.columns]
             vol_col = get_volume_column(df)
             if not vol_col: 
-                error_msgs.append(f"⚠️ {sid}: 找不到成交量欄位")
+                error_msgs.append(f"⚠️ {sid}: 無成交量資料")
                 continue
             
             price = df['close'].iloc[-1]
@@ -323,6 +334,8 @@ if st.button("🔍 執行策略掃描"):
 
             elif "價值低估" in strategy_mode:
                 try:
+                    # 抓財報前再休息一次，因為這是額外的請求
+                    time.sleep(0.5)
                     df_fin = dl.taiwan_stock_financial_statements(stock_id=sid, start_date=fin_start_date)
                     df_eps = df_fin[df_fin['type'].str.contains('BasicEarningsPerShare', na=False)].copy()
                     df_eps = df_eps.sort_values('date')
@@ -360,12 +373,14 @@ if st.button("🔍 執行策略掃描"):
                     fig = plot_vcp_chart(df, sid, strategy_mode)
                     st.plotly_chart(fig, use_container_width=True)
 
+        except KeyError as e:
+            # 專門捕捉 'data' 錯誤
+            error_msgs.append(f"❌ {sid}: API 流量限制 (被拒絕連線)")
         except Exception as e:
             error_msgs.append(f"❌ {sid}: 程式執行錯誤 ({e})")
             pass
         progress_bar.progress((i + 1) / len(stocks))
     
-    # 顯示錯誤日誌
     if error_msgs:
         error_log.write(error_msgs)
     
