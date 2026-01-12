@@ -12,7 +12,7 @@ import time
 # --- 1. 初始化與 Token 設定 ---
 dl = DataLoader()
 
-sleep_time = 1.2 
+sleep_time = 0.5 
 has_token = False
 
 try:
@@ -368,3 +368,4 @@ if st.button("🔍 執行策略掃描"):
     if error_msgs: error_log.write(error_msgs)
     status_text.empty()
     if not found_any: st.warning(f"在「{strategy_mode}」模式下，無符合標的。")
+
