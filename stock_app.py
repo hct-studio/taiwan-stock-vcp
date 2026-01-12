@@ -12,7 +12,7 @@ import time
 # --- 1. 初始化與 Token 設定 ---
 dl = DataLoader()
 
-sleep_time = 0.5 
+sleep_time = 1.2 
 has_token = False
 
 try:
@@ -61,25 +61,20 @@ def get_volume_column(df):
         if c in df.columns: return c
     return None
 
-# ★ 新增功能：抓取個股新聞
 def get_stock_news(sid, days=10):
     try:
-        # 只抓最近 N 天的新聞
         start_date = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime('%Y-%m-%d')
         df_news = dl.taiwan_stock_news(stock_id=sid, start_date=start_date)
         if df_news.empty:
             return []
-        # 去重並取最新的3則
         news_list = df_news[['date', 'title', 'link']].drop_duplicates(subset=['title']).tail(3)
-        # 轉成字典列表回傳 (反序排列，越新越上面)
         return news_list.to_dict('records')[::-1]
     except:
         return []
 
-# ★ 新增功能：計算交易計畫 (買賣價位)
 def calculate_trade_setup(df, strategy_mode, sid):
     price = df['close'].iloc[-1]
-    low_recent = df['close'].iloc[-10:].min() # 近10日低點 (作為停損參考)
+    low_recent = df['close'].iloc[-10:].min() 
     ma5 = df['close'].rolling(5).mean().iloc[-1]
     ma20 = df['close'].rolling(20).mean().iloc[-1]
     
@@ -90,26 +85,21 @@ def calculate_trade_setup(df, strategy_mode, sid):
         "risk_reward": ""
     }
 
-    # 根據不同策略制定不同計畫
     if "VCP" in strategy_mode:
-        # VCP 策略：突破Pivot買進，跌破近期盤整低點停損
-        setup['buy_price'] = price # 視為當下即為突破點
-        setup['stop_loss'] = low_recent * 0.98 # 低點再讓 2% 緩衝
+        setup['buy_price'] = price 
+        setup['stop_loss'] = low_recent * 0.98 
     elif "均線" in strategy_mode or "四線" in strategy_mode:
-        # 均線策略：回測 MA5 或 MA10 買進，跌破 MA20 停損
         setup['buy_price'] = ma5
         setup['stop_loss'] = ma20 * 0.98
     else:
-        # 通用策略：以季線(MA60)或前低為防守
         setup['buy_price'] = price
-        setup['stop_loss'] = price * 0.93 # 預設 7% 停損
+        setup['stop_loss'] = price * 0.93 
 
-    # 計算目標價 (預設 盈虧比 2:1)
     risk = setup['buy_price'] - setup['stop_loss']
     if risk > 0:
         setup['take_profit'] = setup['buy_price'] + (risk * 2)
         rr_ratio = round((setup['take_profit'] - setup['buy_price']) / risk, 1)
-        setup['risk_reward'] = f"2.0 (預估風險 ${round(risk, 1)})"
+        setup['risk_reward'] = f"2.0 (風險 ${round(risk, 1)})"
     else:
         setup['take_profit'] = price * 1.1
         setup['risk_reward'] = "N/A"
@@ -276,7 +266,11 @@ if st.button("🔍 執行策略掃描"):
             vol_col = get_volume_column(df)
             if not vol_col: continue
             
+            # 取得即時報價資訊
             price = df['close'].iloc[-1]
+            today_high = df['max'].iloc[-1]
+            today_low = df['min'].iloc[-1]
+
             ma5 = df['close'].rolling(5).mean().iloc[-1]
             ma10 = df['close'].rolling(10).mean().iloc[-1]
             ma20 = df['close'].rolling(20).mean().iloc[-1]
@@ -321,26 +315,25 @@ if st.button("🔍 執行策略掃描"):
             if is_match:
                 found_any = True
                 
-                # --- ★ 計算交易計畫 ---
                 setup = calculate_trade_setup(df, strategy_mode, sid)
-                
-                # --- ★ 抓取新聞 (只在符合策略時抓，節省流量) ---
                 news_items = get_stock_news(sid)
                 
-                # --- 顯示結果 (區塊佈局) ---
                 display_label = f"✅ {sid} {sname} | {match_reason}"
                 with st.expander(display_label, expanded=True):
-                    # 分成兩欄：左邊圖表+交易計畫，右邊新聞
                     col_main, col_news = st.columns([7, 3])
                     
                     with col_main:
-                        # 顯示交易計畫卡片
+                        # ★ 更新：加入即時報價列
                         st.markdown(f"""
                         <div style="padding: 10px; background-color: #f0f2f6; border-radius: 5px; margin-bottom: 10px;">
+                            <span style="font-size: 1.1em; font-weight: bold; color: #0e1117;">
+                                📊 現價: {price} &nbsp; | &nbsp; ▲ 最高: {today_high} &nbsp; | &nbsp; ▼ 最低: {today_low}
+                            </span>
+                            <hr style="margin: 8px 0;">
                             <span style="color: green; font-weight: bold;">💰 建議買入: {round(setup['buy_price'], 2)}</span> &nbsp;|&nbsp; 
                             <span style="color: red;">🛑 停損價: {round(setup['stop_loss'], 2)}</span> &nbsp;|&nbsp; 
                             <span style="color: blue;">🎯 目標價: {round(setup['take_profit'], 2)}</span> <br>
-                            <small>盈虧比(R/R): {setup['risk_reward']} (此建議僅供技術面參考，非投資建議)</small>
+                            <small>盈虧比(R/R): {setup['risk_reward']}</small>
                         </div>
                         """, unsafe_allow_html=True)
                         
@@ -357,7 +350,6 @@ if st.button("🔍 執行策略掃描"):
                                 st.markdown("---")
                         else:
                             st.info("近期無重大新聞")
-                            # 提供 Google 搜尋連結
                             google_url = f"https://www.google.com/search?q={sid}+{sname}+新聞"
                             st.markdown(f"[🔍 Google 搜尋]({google_url})")
 
@@ -368,4 +360,3 @@ if st.button("🔍 執行策略掃描"):
     if error_msgs: error_log.write(error_msgs)
     status_text.empty()
     if not found_any: st.warning(f"在「{strategy_mode}」模式下，無符合標的。")
-
