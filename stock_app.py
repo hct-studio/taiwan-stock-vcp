@@ -7,28 +7,33 @@ import datetime
 from scipy.signal import argrelextrema
 import numpy as np
 from streamlit_gsheets import GSheetsConnection
-import time # <--- 新增時間模組，用來控制速度
+import time
 
-# --- 1. 初始化數據加載器與 Token 設定 ---
+# --- 1. 初始化與 Token 設定 (智慧加速核心) ---
 dl = DataLoader()
 
-# 嘗試從 Secrets 讀取 FinMind Token (如果有設定的話)
-# 這樣可以大幅提高流量限制，避免抓不到資料
+# 預設為慢速模式
+sleep_time = 1.2 
+has_token = False
+
 try:
     if "FINMIND_API_TOKEN" in st.secrets:
         token = st.secrets["FINMIND_API_TOKEN"]
-        dl.login_by_token(api_token=token)
-        # st.toast("✅ 已載入 FinMind Token，解除流量限制")
-except:
-    pass # 沒設定也沒關係，就用慢速模式
+        if token:
+            dl.login_by_token(api_token=token)
+            sleep_time = 0.1 # <--- 有 Token 就催油門 (只休 0.1 秒)
+            has_token = True
+except Exception as e:
+    print(f"Token載入失敗: {e}")
 
 st.set_page_config(page_title="台股 VCP 專業監控", layout="wide")
 
-# 設定標題樣式
+# 標題顯示目前狀態
+speed_status = "🚀 極速模式 (Token已啟用)" if has_token else "🐢 慢速模式 (未偵測到Token)"
 st.markdown(
-    """
+    f"""
     <h3 style='text-align: left; font-size: 24px; font-weight: bold; margin-bottom: 15px;'>
-    🏹 台股 VCP 型態與量能深度分析 (穩定版)
+    🏹 台股 VCP 型態與量能深度分析 <span style='font-size: 16px; color: gray;'>| {speed_status}</span>
     </h3>
     """, 
     unsafe_allow_html=True
@@ -137,7 +142,7 @@ try:
     if 'stock_id' not in df_sheet.columns:
         current_codes = ['2330']
     else:
-        # ★ 強力清洗：確保代號格式正確
+        # 強力清洗
         raw_codes = df_sheet['stock_id'].astype(str).str.upper().str.strip()
         raw_codes = raw_codes.str.replace(r'\.TW$', '', regex=True)
         raw_codes = raw_codes.str.replace(r'\.TWO$', '', regex=True)
@@ -189,7 +194,7 @@ with st.sidebar.expander("✏️ 點此新增 / 刪除股票"):
         except Exception as e:
             st.error(f"失敗: {e}")
 
-# --- 批次匯入功能 ---
+# 批次匯入功能
 with st.sidebar.expander("📥 批次匯入 (大量貼上)"):
     import_text = st.text_area(
         "貼上股票代號 (支援 .TW / .0 格式自動清洗)：", 
@@ -253,7 +258,9 @@ if st.button("🔍 執行策略掃描"):
     if not stocks:
         st.error("❌ 錯誤：沒有讀到任何有效的股票代號。")
     else:
-        st.info(f"✅ 系統已讀取 {len(stocks)} 檔股票，正在分析中... (每檔間隔 1.2 秒以防斷線)")
+        # 顯示加速狀態提示
+        mode_text = "極速" if has_token else "慢速"
+        st.info(f"✅ [{mode_text}模式] 系統已讀取 {len(stocks)} 檔股票，正在分析中... (每檔間隔 {sleep_time} 秒)")
 
     start_date = (datetime.datetime.now() - datetime.timedelta(days=400)).strftime('%Y-%m-%d')
     fin_start_date = (datetime.datetime.now() - datetime.timedelta(days=600)).strftime('%Y-%m-%d')
@@ -269,21 +276,19 @@ if st.button("🔍 執行策略掃描"):
         sname = name_map.get(sid, "")
         status_text.text(f"正在分析 ({i+1}/{len(stocks)}): {sid} {sname}...")
         
-        # ★ 關鍵修改：強制休息 1.2 秒，避免被 API 封鎖
-        time.sleep(0.5) 
+        # ★ 智慧睡眠：有 Token 睡 0.1s，沒 Token 睡 1.2s
+        time.sleep(sleep_time)
 
         try:
             # 1. 抓股價資料
             df = dl.taiwan_stock_daily(stock_id=sid, start_date=start_date)
             
-            # --- Debug 檢查區 ---
             if df.empty:
-                error_msgs.append(f"❌ {sid}: FinMind 回傳空資料 (可能流量超限或代號錯誤)")
+                error_msgs.append(f"❌ {sid}: 空資料 (可能被限流或代號錯誤)")
                 continue
             if len(df) < 120:
                 error_msgs.append(f"⚠️ {sid}: 資料不足 120 筆")
                 continue
-            # --------------------
 
             df.columns = [c.lower() for c in df.columns]
             vol_col = get_volume_column(df)
@@ -334,8 +339,8 @@ if st.button("🔍 執行策略掃描"):
 
             elif "價值低估" in strategy_mode:
                 try:
-                    # 抓財報前再休息一次，因為這是額外的請求
-                    time.sleep(0.5)
+                    # 抓財報也用智慧睡眠
+                    time.sleep(sleep_time)
                     df_fin = dl.taiwan_stock_financial_statements(stock_id=sid, start_date=fin_start_date)
                     df_eps = df_fin[df_fin['type'].str.contains('BasicEarningsPerShare', na=False)].copy()
                     df_eps = df_eps.sort_values('date')
@@ -373,11 +378,8 @@ if st.button("🔍 執行策略掃描"):
                     fig = plot_vcp_chart(df, sid, strategy_mode)
                     st.plotly_chart(fig, use_container_width=True)
 
-        except KeyError as e:
-            # 專門捕捉 'data' 錯誤
-            error_msgs.append(f"❌ {sid}: API 流量限制 (被拒絕連線)")
         except Exception as e:
-            error_msgs.append(f"❌ {sid}: 程式執行錯誤 ({e})")
+            error_msgs.append(f"❌ {sid}: 錯誤 ({e})")
             pass
         progress_bar.progress((i + 1) / len(stocks))
     
@@ -387,4 +389,3 @@ if st.button("🔍 執行策略掃描"):
     status_text.empty()
     if not found_any:
         st.warning(f"在「{strategy_mode}」模式下，您的自選股中無符合標的。")
-
