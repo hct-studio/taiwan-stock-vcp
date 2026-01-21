@@ -328,9 +328,13 @@ if st.button("🔍 執行策略掃描"):
                     is_match = True; match_reason = "四線合一 + 爆量"; details = f"量能 {round(vol_ratio,1)}倍"
             
             elif "停損" in strategy_mode:
-                # ★ 1. 優先判斷：空頭走勢 (跌破月線 > 3天)
+                # ★ 優化邏輯：提高量大股的門檻，或針對邊緣股從嚴認定
+                # 將門檻從 10,000 提高到 15,000，讓像昇貿這種 9千~1萬張的股票，
+                # 強制歸類為 "中小型股"，需守 10日線。
+                threshold_sheets = 15000 
+                
+                # 1. 優先判斷：空頭走勢 (跌破月線 > 3天) - 這是最嚴重的，不分量大量小
                 last_3_days_bearish_monthly = True
-                # 檢查倒數 3 天 (-1, -2, -3) 是否都小於 月線(ma20)
                 for k in range(1, 4):
                     if df['close'].iloc[-k] >= df['ma20'].iloc[-k]:
                         last_3_days_bearish_monthly = False
@@ -341,22 +345,20 @@ if st.button("🔍 執行策略掃描"):
                      match_reason = "☠️ 空頭走勢 (連破月線 > 3日)"
                      details = f"趨勢已轉空 | 連續3日收盤 < 月線"
 
-                # ★ 2. 次要判斷：破線警示 (剛轉弱)
+                # 2. 次要判斷：破線警示
                 else:
-                    threshold_sheets = 10000
-                    
                     if avg_vol_60_sheets < threshold_sheets:
-                        # 量小股：跌破 10日線
+                        # 量小/中型股 (< 1.5萬張)：嚴格守 10日線
                         if price < ma10:
                             is_match = True
-                            match_reason = "⚠️ 破 10日線 (量小股)"
-                            details = f"均量 {avg_vol_60_sheets}張 (<1萬) | 收盤 < 10MA"
+                            match_reason = f"⚠️ 破 10日線 (均量{avg_vol_60_sheets}張)"
+                            details = f"中小型股防守轉弱 | 收盤 {price} < 10MA {round(ma10, 2)}"
                     else:
-                        # 量大股：跌破 月線 (但未滿3天)
+                        # 超級熱門股 (> 1.5萬張)：才允許守 月線
                         if price < ma20:
                             is_match = True
-                            match_reason = "⚠️ 破 月線 (量大股)"
-                            details = f"均量 {avg_vol_60_sheets}張 (>1萬) | 收盤 < 20MA (留意3日法則)"
+                            match_reason = f"⚠️ 破 月線 (熱門股)"
+                            details = f"熱門股波段轉弱 | 收盤 {price} < 20MA {round(ma20, 2)}"
 
             elif "價值" in strategy_mode:
                 try:
@@ -421,3 +423,4 @@ if st.button("🔍 執行策略掃描"):
     if error_msgs: error_log.write(error_msgs)
     status_text.empty()
     if not found_any: st.warning(f"在「{strategy_mode}」模式下，無符合標的。")
+
