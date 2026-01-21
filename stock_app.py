@@ -16,27 +16,19 @@ sleep_time = 1.2
 has_token = False
 
 try:
-    # 1. 嘗試從最外層讀取
     token = st.secrets.get("FINMIND_API_TOKEN")
-    
-    # 2. 深入挖掘 nested secrets
     if not token:
         if "connections" in st.secrets and "gsheets" in st.secrets["connections"]:
             token = st.secrets["connections"]["gsheets"].get("FINMIND_API_TOKEN")
-            
-    # 3. 終極防呆
     if not token:
         for key in st.secrets:
             if "FINMIND" in key and isinstance(st.secrets[key], str):
                 token = st.secrets[key]
                 break
-
-    # 4. 登入驗證
     if token:
         dl.login_by_token(api_token=token)
-        sleep_time = 0.1 # 有 Token 就催油門
+        sleep_time = 0.1 
         has_token = True
-        
 except Exception as e:
     pass
 
@@ -101,11 +93,10 @@ def calculate_trade_setup(df, strategy_mode, sid):
         "risk_reward": ""
     }
 
-    # 針對停損策略，顯示建議的賣出點
     if "停損" in strategy_mode:
-        setup['buy_price'] = price # 現價(賣出價)
-        setup['stop_loss'] = price * 1.05 # 這裡的反向邏輯：如果反彈超過5%可能誤判，視為回補點(僅供參考)
-        setup['take_profit'] = low_recent # 下看近期低點
+        setup['buy_price'] = price 
+        setup['stop_loss'] = price * 1.05 
+        setup['take_profit'] = low_recent 
         setup['risk_reward'] = "⚠️ 賣訊"
         
     elif "VCP" in strategy_mode:
@@ -118,7 +109,6 @@ def calculate_trade_setup(df, strategy_mode, sid):
         setup['buy_price'] = price
         setup['stop_loss'] = price * 0.93 
 
-    # 計算盈虧比 (僅對買進策略有效)
     if "停損" not in strategy_mode:
         risk = setup['buy_price'] - setup['stop_loss']
         if risk > 0:
@@ -178,14 +168,13 @@ def plot_vcp_chart(df, sid, strategy_name=""):
 
 st.sidebar.header("📋 策略與清單管理")
 
-# 新增策略選項
 strategy_mode = st.sidebar.radio(
     "🎯 選擇掃描模式",
     (
         "🔍 VCP 準突破 (量縮價穩)", 
         "🚀 四線合一+爆量 (強勢起漲)",
         "💰 價值低估 (PE < 20)",
-        "📉 停損/停利預警 (量價動態)", # <--- 新增的策略
+        "📉 停損/停利預警 (量價動態)", 
         "📈 均線多頭 (VCP 趨勢)", 
         "🔥 量能爆發 (短線動能)"
     )
@@ -263,7 +252,8 @@ elif "量能" in strategy_mode:
 elif "價值" in strategy_mode:
     pe_limit = st.sidebar.slider("本益比 (PE) 上限", 10, 50, 20)
 elif "停損" in strategy_mode:
-    st.sidebar.info("策略邏輯：\n1. 日均量 < 1萬張：跌破 10日線 警示\n2. 日均量 > 1萬張：跌破 月線(20MA) 警示")
+    # 修改提示文字
+    st.sidebar.info("策略邏輯 (依60日均量區分)：\n1. 均量 < 1萬張：跌破 10日線 警示\n2. 均量 > 1萬張：跌破 月線(20MA) 警示")
 
 # --- 執行掃描 ---
 if st.button("🔍 執行策略掃描"):
@@ -307,12 +297,13 @@ if st.button("🔍 執行策略掃描"):
             ma60 = df['close'].rolling(60).mean().iloc[-1]
             ma200 = df['close'].rolling(200).mean().iloc[-1]
             
-            # 成交量計算 (FinMind 單位是股，1張=1000股)
-            avg_vol_20_shares = df[vol_col].rolling(20).mean().iloc[-1] # 20日均量 (股)
-            avg_vol_20_sheets = int(avg_vol_20_shares / 1000) # 換算成張數
+            # --- 修改重點：計算 60日 (季) 平均成交量 ---
+            avg_vol_60_shares = df[vol_col].rolling(60).mean().iloc[-1] 
+            avg_vol_60_sheets = int(avg_vol_60_shares / 1000) # 換算成張數
             
+            # VCP 用 (維持短天期比較)
+            avg_vol_20 = df[vol_col].iloc[-21:-1].mean()
             curr_vol = df[vol_col].iloc[-1]
-            avg_vol_20 = df[vol_col].iloc[-21:-1].mean() # 舊版計算 for VCP
             vol_ratio = curr_vol / avg_vol_20 if avg_vol_20 > 0 else 0
 
             is_match = False; match_reason = ""; details = ""
@@ -328,23 +319,22 @@ if st.button("🔍 執行策略掃描"):
                 if vol_ratio >= 2.0 and price > ma5 and price > ma10 and price > ma20 and price > ma60:
                     is_match = True; match_reason = "四線合一 + 爆量"; details = f"量能 {round(vol_ratio,1)}倍"
             
-            # ★ 新增：停損/停利預警策略
             elif "停損" in strategy_mode:
-                # 判斷條件：量小(<10000張) vs 量大(>=10000張)
+                # ★ 修改為使用 60日均量 判斷
                 threshold_sheets = 10000
                 
-                if avg_vol_20_sheets < threshold_sheets:
+                if avg_vol_60_sheets < threshold_sheets:
                     # 量小股：跌破 10日線 警示
                     if price < ma10:
                         is_match = True
                         match_reason = "⚠️ 破 10日線 (量小股)"
-                        details = f"均量 {avg_vol_20_sheets}張 (<1萬) | 收盤 {price} < 10MA {round(ma10, 2)}"
+                        details = f"60日均量 {avg_vol_60_sheets}張 (<1萬) | 收盤 {price} < 10MA {round(ma10, 2)}"
                 else:
                     # 量大股：跌破 月線 警示
                     if price < ma20:
                         is_match = True
                         match_reason = "⚠️ 破 月線 (量大股)"
-                        details = f"均量 {avg_vol_20_sheets}張 (>1萬) | 收盤 {price} < 20MA {round(ma20, 2)}"
+                        details = f"60日均量 {avg_vol_60_sheets}張 (>1萬) | 收盤 {price} < 20MA {round(ma20, 2)}"
 
             elif "價值" in strategy_mode:
                 try:
@@ -374,7 +364,6 @@ if st.button("🔍 執行策略掃描"):
                     col_main, col_news = st.columns([7, 3])
                     
                     with col_main:
-                        # 顯示報價卡片
                         st.markdown(f"""
                         <div style="padding: 10px; background-color: #f0f2f6; border-radius: 5px; margin-bottom: 10px;">
                             <span style="font-size: 1.1em; font-weight: bold; color: #0e1117;">
