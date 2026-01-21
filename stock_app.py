@@ -83,7 +83,6 @@ def calculate_trade_setup(df, strategy_mode, sid):
     price = df['close'].iloc[-1]
     low_recent = df['close'].iloc[-10:].min() 
     
-    # 這裡只取數值供 setup 計算使用
     ma5 = df['ma5'].iloc[-1]
     ma10 = df['ma10'].iloc[-1]
     ma20 = df['ma20'].iloc[-1]
@@ -126,7 +125,7 @@ def calculate_trade_setup(df, strategy_mode, sid):
 # --- 3. 繪圖函數 ---
 def plot_vcp_chart(df, sid, strategy_name=""):
     vol_col = get_volume_column(df)
-    # 繪圖時確保均線資料存在
+    
     if 'ma5' not in df.columns: df['ma5'] = df['close'].rolling(5).mean()
     if 'ma10' not in df.columns: df['ma10'] = df['close'].rolling(10).mean()
     if 'ma20' not in df.columns: df['ma20'] = df['close'].rolling(20).mean()
@@ -255,7 +254,7 @@ elif "量能" in strategy_mode:
 elif "價值" in strategy_mode:
     pe_limit = st.sidebar.slider("本益比 (PE) 上限", 10, 50, 20)
 elif "停損" in strategy_mode:
-    st.sidebar.info("判斷邏輯：\n1. 剛跌破：收盤價 < 均線\n2. 空頭走勢：連續3日收盤 < 均線")
+    st.sidebar.info("判斷邏輯：\n1. 空頭走勢：連3日破月線\n2. 破線警示：量小破10日線 / 量大破月線")
 
 # --- 執行掃描 ---
 if st.button("🔍 執行策略掃描"):
@@ -292,7 +291,7 @@ if st.button("🔍 執行策略掃描"):
             today_high = df['max'].iloc[-1]
             today_low = df['min'].iloc[-1]
 
-            # ★ 修改：均線改為整列計算，方便回測歷史
+            # 計算均線
             df['ma5'] = df['close'].rolling(5).mean()
             df['ma10'] = df['close'].rolling(10).mean()
             df['ma20'] = df['close'].rolling(20).mean()
@@ -329,32 +328,35 @@ if st.button("🔍 執行策略掃描"):
                     is_match = True; match_reason = "四線合一 + 爆量"; details = f"量能 {round(vol_ratio,1)}倍"
             
             elif "停損" in strategy_mode:
-                threshold_sheets = 10000
-                
-                # 決定使用哪條均線 (量小10日 / 量大月線)
-                target_ma_col = 'ma10' if avg_vol_60_sheets < threshold_sheets else 'ma20'
-                target_ma_name = '10日線' if avg_vol_60_sheets < threshold_sheets else '月線'
-                
-                # 判斷邏輯：
-                # 1. 如果連續 3 天都收在均線下 -> 顯示 "空頭走勢"
-                # 2. 如果只有今天(或<3天)跌破 -> 顯示 "破 XX 線"
-                
-                last_3_days_bearish = True
-                # 檢查倒數 3 天 (-1, -2, -3)
+                # ★ 1. 優先判斷：空頭走勢 (跌破月線 > 3天)
+                last_3_days_bearish_monthly = True
+                # 檢查倒數 3 天 (-1, -2, -3) 是否都小於 月線(ma20)
                 for k in range(1, 4):
-                    if df['close'].iloc[-k] >= df[target_ma_col].iloc[-k]:
-                        last_3_days_bearish = False
+                    if df['close'].iloc[-k] >= df['ma20'].iloc[-k]:
+                        last_3_days_bearish_monthly = False
                         break
                 
-                if last_3_days_bearish:
-                    is_match = True
-                    match_reason = f"☠️ 空頭走勢 (連破{target_ma_name} > 3日)"
-                    details = f"均量 {avg_vol_60_sheets}張 | 連續3日收盤 < {target_ma_name}"
-                
-                elif price < df[target_ma_col].iloc[-1]:
-                    is_match = True
-                    match_reason = f"⚠️ 破 {target_ma_name}"
-                    details = f"均量 {avg_vol_60_sheets}張 | 收盤 {price} < {target_ma_name} {round(df[target_ma_col].iloc[-1], 2)}"
+                if last_3_days_bearish_monthly:
+                     is_match = True
+                     match_reason = "☠️ 空頭走勢 (連破月線 > 3日)"
+                     details = f"趨勢已轉空 | 連續3日收盤 < 月線"
+
+                # ★ 2. 次要判斷：破線警示 (剛轉弱)
+                else:
+                    threshold_sheets = 10000
+                    
+                    if avg_vol_60_sheets < threshold_sheets:
+                        # 量小股：跌破 10日線
+                        if price < ma10:
+                            is_match = True
+                            match_reason = "⚠️ 破 10日線 (量小股)"
+                            details = f"均量 {avg_vol_60_sheets}張 (<1萬) | 收盤 < 10MA"
+                    else:
+                        # 量大股：跌破 月線 (但未滿3天)
+                        if price < ma20:
+                            is_match = True
+                            match_reason = "⚠️ 破 月線 (量大股)"
+                            details = f"均量 {avg_vol_60_sheets}張 (>1萬) | 收盤 < 20MA (留意3日法則)"
 
             elif "價值" in strategy_mode:
                 try:
