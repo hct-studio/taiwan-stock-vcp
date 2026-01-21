@@ -9,19 +9,34 @@ import numpy as np
 from streamlit_gsheets import GSheetsConnection
 import time
 
-# --- 1. 初始化與 Token 設定 ---
+# --- 1. 初始化與 Token 設定 (全方位偵測版) ---
 dl = DataLoader()
 
 sleep_time = 1.2 
 has_token = False
 
 try:
-    if "FINMIND_API_TOKEN" in st.secrets:
-        token = st.secrets["FINMIND_API_TOKEN"]
-        if token:
-            dl.login_by_token(api_token=token)
-            sleep_time = 0.1
-            has_token = True
+    # 1. 嘗試從最外層讀取
+    token = st.secrets.get("FINMIND_API_TOKEN")
+    
+    # 2. 深入挖掘 nested secrets
+    if not token:
+        if "connections" in st.secrets and "gsheets" in st.secrets["connections"]:
+            token = st.secrets["connections"]["gsheets"].get("FINMIND_API_TOKEN")
+            
+    # 3. 終極防呆
+    if not token:
+        for key in st.secrets:
+            if "FINMIND" in key and isinstance(st.secrets[key], str):
+                token = st.secrets[key]
+                break
+
+    # 4. 登入驗證
+    if token:
+        dl.login_by_token(api_token=token)
+        sleep_time = 0.1 # 有 Token 就催油門
+        has_token = True
+        
 except Exception as e:
     pass
 
@@ -76,6 +91,7 @@ def calculate_trade_setup(df, strategy_mode, sid):
     price = df['close'].iloc[-1]
     low_recent = df['close'].iloc[-10:].min() 
     ma5 = df['close'].rolling(5).mean().iloc[-1]
+    ma10 = df['close'].rolling(10).mean().iloc[-1]
     ma20 = df['close'].rolling(20).mean().iloc[-1]
     
     setup = {
@@ -85,7 +101,14 @@ def calculate_trade_setup(df, strategy_mode, sid):
         "risk_reward": ""
     }
 
-    if "VCP" in strategy_mode:
+    # 針對停損策略，顯示建議的賣出點
+    if "停損" in strategy_mode:
+        setup['buy_price'] = price # 現價(賣出價)
+        setup['stop_loss'] = price * 1.05 # 這裡的反向邏輯：如果反彈超過5%可能誤判，視為回補點(僅供參考)
+        setup['take_profit'] = low_recent # 下看近期低點
+        setup['risk_reward'] = "⚠️ 賣訊"
+        
+    elif "VCP" in strategy_mode:
         setup['buy_price'] = price 
         setup['stop_loss'] = low_recent * 0.98 
     elif "均線" in strategy_mode or "四線" in strategy_mode:
@@ -95,14 +118,16 @@ def calculate_trade_setup(df, strategy_mode, sid):
         setup['buy_price'] = price
         setup['stop_loss'] = price * 0.93 
 
-    risk = setup['buy_price'] - setup['stop_loss']
-    if risk > 0:
-        setup['take_profit'] = setup['buy_price'] + (risk * 2)
-        rr_ratio = round((setup['take_profit'] - setup['buy_price']) / risk, 1)
-        setup['risk_reward'] = f"2.0 (風險 ${round(risk, 1)})"
-    else:
-        setup['take_profit'] = price * 1.1
-        setup['risk_reward'] = "N/A"
+    # 計算盈虧比 (僅對買進策略有效)
+    if "停損" not in strategy_mode:
+        risk = setup['buy_price'] - setup['stop_loss']
+        if risk > 0:
+            setup['take_profit'] = setup['buy_price'] + (risk * 2)
+            rr_ratio = round((setup['take_profit'] - setup['buy_price']) / risk, 1)
+            setup['risk_reward'] = f"2.0 (風險 ${round(risk, 1)})"
+        else:
+            setup['take_profit'] = price * 1.1
+            setup['risk_reward'] = "N/A"
 
     return setup
 
@@ -131,9 +156,9 @@ def plot_vcp_chart(df, sid, strategy_name=""):
         increasing_line_color='red', decreasing_line_color='green'
     ), row=1, col=1)
 
-    fig.add_trace(go.Scatter(x=plot_df['date'], y=plot_df['ma5'], line=dict(color='purple', width=1), name="MA5"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=plot_df['date'], y=plot_df['ma20'], line=dict(color='orange', width=1.5), name="MA20"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=plot_df['date'], y=plot_df['ma60'], line=dict(color='blue', width=1.5), name="MA60"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=plot_df['date'], y=plot_df['ma10'], line=dict(color='purple', width=1), name="MA10"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=plot_df['date'], y=plot_df['ma20'], line=dict(color='orange', width=1.5), name="MA20(月)"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=plot_df['date'], y=plot_df['ma60'], line=dict(color='blue', width=1.5), name="MA60(季)"), row=1, col=1)
 
     for i in high_idx[-3:]:
         fig.add_annotation(x=plot_df['date'].iloc[i], y=plot_df['max'].iloc[i], text="▼高", showarrow=True, row=1, col=1)
@@ -153,12 +178,14 @@ def plot_vcp_chart(df, sid, strategy_name=""):
 
 st.sidebar.header("📋 策略與清單管理")
 
+# 新增策略選項
 strategy_mode = st.sidebar.radio(
     "🎯 選擇掃描模式",
     (
         "🔍 VCP 準突破 (量縮價穩)", 
         "🚀 四線合一+爆量 (強勢起漲)",
         "💰 價值低估 (PE < 20)",
+        "📉 停損/停利預警 (量價動態)", # <--- 新增的策略
         "📈 均線多頭 (VCP 趨勢)", 
         "🔥 量能爆發 (短線動能)"
     )
@@ -235,6 +262,8 @@ elif "量能" in strategy_mode:
     vol_factor = st.sidebar.slider("量能倍數門檻", 1.5, 5.0, 2.0, step=0.1)
 elif "價值" in strategy_mode:
     pe_limit = st.sidebar.slider("本益比 (PE) 上限", 10, 50, 20)
+elif "停損" in strategy_mode:
+    st.sidebar.info("策略邏輯：\n1. 日均量 < 1萬張：跌破 10日線 警示\n2. 日均量 > 1萬張：跌破 月線(20MA) 警示")
 
 # --- 執行掃描 ---
 if st.button("🔍 執行策略掃描"):
@@ -278,8 +307,12 @@ if st.button("🔍 執行策略掃描"):
             ma60 = df['close'].rolling(60).mean().iloc[-1]
             ma200 = df['close'].rolling(200).mean().iloc[-1]
             
-            avg_vol_20 = df[vol_col].iloc[-21:-1].mean()
+            # 成交量計算 (FinMind 單位是股，1張=1000股)
+            avg_vol_20_shares = df[vol_col].rolling(20).mean().iloc[-1] # 20日均量 (股)
+            avg_vol_20_sheets = int(avg_vol_20_shares / 1000) # 換算成張數
+            
             curr_vol = df[vol_col].iloc[-1]
+            avg_vol_20 = df[vol_col].iloc[-21:-1].mean() # 舊版計算 for VCP
             vol_ratio = curr_vol / avg_vol_20 if avg_vol_20 > 0 else 0
 
             is_match = False; match_reason = ""; details = ""
@@ -294,6 +327,24 @@ if st.button("🔍 執行策略掃描"):
             elif "四線" in strategy_mode:
                 if vol_ratio >= 2.0 and price > ma5 and price > ma10 and price > ma20 and price > ma60:
                     is_match = True; match_reason = "四線合一 + 爆量"; details = f"量能 {round(vol_ratio,1)}倍"
+            
+            # ★ 新增：停損/停利預警策略
+            elif "停損" in strategy_mode:
+                # 判斷條件：量小(<10000張) vs 量大(>=10000張)
+                threshold_sheets = 10000
+                
+                if avg_vol_20_sheets < threshold_sheets:
+                    # 量小股：跌破 10日線 警示
+                    if price < ma10:
+                        is_match = True
+                        match_reason = "⚠️ 破 10日線 (量小股)"
+                        details = f"均量 {avg_vol_20_sheets}張 (<1萬) | 收盤 {price} < 10MA {round(ma10, 2)}"
+                else:
+                    # 量大股：跌破 月線 警示
+                    if price < ma20:
+                        is_match = True
+                        match_reason = "⚠️ 破 月線 (量大股)"
+                        details = f"均量 {avg_vol_20_sheets}張 (>1萬) | 收盤 {price} < 20MA {round(ma20, 2)}"
 
             elif "價值" in strategy_mode:
                 try:
@@ -323,17 +374,16 @@ if st.button("🔍 執行策略掃描"):
                     col_main, col_news = st.columns([7, 3])
                     
                     with col_main:
-                        # ★ 更新：加入即時報價列
+                        # 顯示報價卡片
                         st.markdown(f"""
                         <div style="padding: 10px; background-color: #f0f2f6; border-radius: 5px; margin-bottom: 10px;">
                             <span style="font-size: 1.1em; font-weight: bold; color: #0e1117;">
                                 📊 現價: {price} &nbsp; | &nbsp; ▲ 最高: {today_high} &nbsp; | &nbsp; ▼ 最低: {today_low}
                             </span>
                             <hr style="margin: 8px 0;">
-                            <span style="color: green; font-weight: bold;">💰 建議買入: {round(setup['buy_price'], 2)}</span> &nbsp;|&nbsp; 
-                            <span style="color: red;">🛑 停損價: {round(setup['stop_loss'], 2)}</span> &nbsp;|&nbsp; 
-                            <span style="color: blue;">🎯 目標價: {round(setup['take_profit'], 2)}</span> <br>
-                            <small>盈虧比(R/R): {setup['risk_reward']}</small>
+                            <span style="color: {'green' if '停損' not in strategy_mode else 'gray'}; font-weight: bold;">💰 {'建議買入' if '停損' not in strategy_mode else '參考價'}: {round(setup['buy_price'], 2)}</span> &nbsp;|&nbsp; 
+                            <span style="color: red;">🛑 {'停損價' if '停損' not in strategy_mode else '破線警示價'}: {round(setup['stop_loss'], 2)}</span> <br>
+                            <small>{setup['risk_reward']}</small>
                         </div>
                         """, unsafe_allow_html=True)
                         
