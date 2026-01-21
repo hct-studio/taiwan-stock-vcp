@@ -82,9 +82,11 @@ def get_stock_news(sid, days=10):
 def calculate_trade_setup(df, strategy_mode, sid):
     price = df['close'].iloc[-1]
     low_recent = df['close'].iloc[-10:].min() 
-    ma5 = df['close'].rolling(5).mean().iloc[-1]
-    ma10 = df['close'].rolling(10).mean().iloc[-1]
-    ma20 = df['close'].rolling(20).mean().iloc[-1]
+    
+    # 這裡只取數值供 setup 計算使用
+    ma5 = df['ma5'].iloc[-1]
+    ma10 = df['ma10'].iloc[-1]
+    ma20 = df['ma20'].iloc[-1]
     
     setup = {
         "buy_price": 0,
@@ -124,11 +126,12 @@ def calculate_trade_setup(df, strategy_mode, sid):
 # --- 3. 繪圖函數 ---
 def plot_vcp_chart(df, sid, strategy_name=""):
     vol_col = get_volume_column(df)
-    df['ma5'] = df['close'].rolling(5).mean()
-    df['ma10'] = df['close'].rolling(10).mean()
-    df['ma20'] = df['close'].rolling(20).mean()
-    df['ma60'] = df['close'].rolling(60).mean()
-    df['ma200'] = df['close'].rolling(200).mean()
+    # 繪圖時確保均線資料存在
+    if 'ma5' not in df.columns: df['ma5'] = df['close'].rolling(5).mean()
+    if 'ma10' not in df.columns: df['ma10'] = df['close'].rolling(10).mean()
+    if 'ma20' not in df.columns: df['ma20'] = df['close'].rolling(20).mean()
+    if 'ma60' not in df.columns: df['ma60'] = df['close'].rolling(60).mean()
+    if 'ma200' not in df.columns: df['ma200'] = df['close'].rolling(200).mean()
     
     plot_df = df.iloc[-120:].copy().reset_index(drop=True)
     high_idx, low_idx = find_vcp_points(plot_df)
@@ -252,8 +255,7 @@ elif "量能" in strategy_mode:
 elif "價值" in strategy_mode:
     pe_limit = st.sidebar.slider("本益比 (PE) 上限", 10, 50, 20)
 elif "停損" in strategy_mode:
-    # 修改提示文字
-    st.sidebar.info("策略邏輯 (依60日均量區分)：\n1. 均量 < 1萬張：跌破 10日線 警示\n2. 均量 > 1萬張：跌破 月線(20MA) 警示")
+    st.sidebar.info("判斷邏輯：\n1. 剛跌破：收盤價 < 均線\n2. 空頭走勢：連續3日收盤 < 均線")
 
 # --- 執行掃描 ---
 if st.button("🔍 執行策略掃描"):
@@ -285,23 +287,30 @@ if st.button("🔍 執行策略掃描"):
             vol_col = get_volume_column(df)
             if not vol_col: continue
             
-            # 取得即時報價資訊
+            # 取得即時報價
             price = df['close'].iloc[-1]
             today_high = df['max'].iloc[-1]
             today_low = df['min'].iloc[-1]
 
-            ma5 = df['close'].rolling(5).mean().iloc[-1]
-            ma10 = df['close'].rolling(10).mean().iloc[-1]
-            ma20 = df['close'].rolling(20).mean().iloc[-1]
-            ma50 = df['close'].rolling(50).mean().iloc[-1]
-            ma60 = df['close'].rolling(60).mean().iloc[-1]
-            ma200 = df['close'].rolling(200).mean().iloc[-1]
+            # ★ 修改：均線改為整列計算，方便回測歷史
+            df['ma5'] = df['close'].rolling(5).mean()
+            df['ma10'] = df['close'].rolling(10).mean()
+            df['ma20'] = df['close'].rolling(20).mean()
+            df['ma50'] = df['close'].rolling(50).mean()
+            df['ma60'] = df['close'].rolling(60).mean()
+            df['ma200'] = df['close'].rolling(200).mean()
             
-            # --- 修改重點：計算 60日 (季) 平均成交量 ---
+            ma5 = df['ma5'].iloc[-1]
+            ma10 = df['ma10'].iloc[-1]
+            ma20 = df['ma20'].iloc[-1]
+            ma50 = df['ma50'].iloc[-1]
+            ma60 = df['ma60'].iloc[-1]
+            ma200 = df['ma200'].iloc[-1]
+            
+            # 60日均量
             avg_vol_60_shares = df[vol_col].rolling(60).mean().iloc[-1] 
-            avg_vol_60_sheets = int(avg_vol_60_shares / 1000) # 換算成張數
+            avg_vol_60_sheets = int(avg_vol_60_shares / 1000)
             
-            # VCP 用 (維持短天期比較)
             avg_vol_20 = df[vol_col].iloc[-21:-1].mean()
             curr_vol = df[vol_col].iloc[-1]
             vol_ratio = curr_vol / avg_vol_20 if avg_vol_20 > 0 else 0
@@ -320,21 +329,32 @@ if st.button("🔍 執行策略掃描"):
                     is_match = True; match_reason = "四線合一 + 爆量"; details = f"量能 {round(vol_ratio,1)}倍"
             
             elif "停損" in strategy_mode:
-                # ★ 修改為使用 60日均量 判斷
                 threshold_sheets = 10000
                 
-                if avg_vol_60_sheets < threshold_sheets:
-                    # 量小股：跌破 10日線 警示
-                    if price < ma10:
-                        is_match = True
-                        match_reason = "⚠️ 破 10日線 (量小股)"
-                        details = f"60日均量 {avg_vol_60_sheets}張 (<1萬) | 收盤 {price} < 10MA {round(ma10, 2)}"
-                else:
-                    # 量大股：跌破 月線 警示
-                    if price < ma20:
-                        is_match = True
-                        match_reason = "⚠️ 破 月線 (量大股)"
-                        details = f"60日均量 {avg_vol_60_sheets}張 (>1萬) | 收盤 {price} < 20MA {round(ma20, 2)}"
+                # 決定使用哪條均線 (量小10日 / 量大月線)
+                target_ma_col = 'ma10' if avg_vol_60_sheets < threshold_sheets else 'ma20'
+                target_ma_name = '10日線' if avg_vol_60_sheets < threshold_sheets else '月線'
+                
+                # 判斷邏輯：
+                # 1. 如果連續 3 天都收在均線下 -> 顯示 "空頭走勢"
+                # 2. 如果只有今天(或<3天)跌破 -> 顯示 "破 XX 線"
+                
+                last_3_days_bearish = True
+                # 檢查倒數 3 天 (-1, -2, -3)
+                for k in range(1, 4):
+                    if df['close'].iloc[-k] >= df[target_ma_col].iloc[-k]:
+                        last_3_days_bearish = False
+                        break
+                
+                if last_3_days_bearish:
+                    is_match = True
+                    match_reason = f"☠️ 空頭走勢 (連破{target_ma_name} > 3日)"
+                    details = f"均量 {avg_vol_60_sheets}張 | 連續3日收盤 < {target_ma_name}"
+                
+                elif price < df[target_ma_col].iloc[-1]:
+                    is_match = True
+                    match_reason = f"⚠️ 破 {target_ma_name}"
+                    details = f"均量 {avg_vol_60_sheets}張 | 收盤 {price} < {target_ma_name} {round(df[target_ma_col].iloc[-1], 2)}"
 
             elif "價值" in strategy_mode:
                 try:
