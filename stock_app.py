@@ -95,10 +95,10 @@ def calculate_trade_setup(df, strategy_mode, sid):
     }
 
     if "停損" in strategy_mode:
-        setup['buy_price'] = price 
-        setup['stop_loss'] = price * 1.05 
-        setup['take_profit'] = low_recent 
-        setup['risk_reward'] = "⚠️ 賣訊"
+        setup['buy_price'] = price # 對於賣訊，這是"現價"
+        setup['stop_loss'] = price * 1.05 # 破線後反彈5%視為誤判(回補)
+        setup['take_profit'] = low_recent # 下檔支撐看前低
+        setup['risk_reward'] = "⚠️ 賣出訊號"
         
     elif "VCP" in strategy_mode:
         setup['buy_price'] = price 
@@ -114,6 +114,7 @@ def calculate_trade_setup(df, strategy_mode, sid):
         risk = setup['buy_price'] - setup['stop_loss']
         if risk > 0:
             setup['take_profit'] = setup['buy_price'] + (risk * 2)
+            # 防止分母為0
             rr_ratio = round((setup['take_profit'] - setup['buy_price']) / risk, 1)
             setup['risk_reward'] = f"2.0 (風險 ${round(risk, 1)})"
         else:
@@ -126,6 +127,7 @@ def calculate_trade_setup(df, strategy_mode, sid):
 def plot_vcp_chart(df, sid, strategy_name=""):
     vol_col = get_volume_column(df)
     
+    # 確保均線存在
     if 'ma5' not in df.columns: df['ma5'] = df['close'].rolling(5).mean()
     if 'ma10' not in df.columns: df['ma10'] = df['close'].rolling(10).mean()
     if 'ma20' not in df.columns: df['ma20'] = df['close'].rolling(20).mean()
@@ -254,7 +256,7 @@ elif "量能" in strategy_mode:
 elif "價值" in strategy_mode:
     pe_limit = st.sidebar.slider("本益比 (PE) 上限", 10, 50, 20)
 elif "停損" in strategy_mode:
-    st.sidebar.info("判斷邏輯：\n1. 空頭走勢：連3日破月線\n2. 破線警示：量小破10日線 / 量大破月線")
+    st.sidebar.info("判斷邏輯：\n1. 空頭走勢：連3日破月線\n2. 破線警示：量小(<1.5萬)破10日 / 量大破月線")
 
 # --- 執行掃描 ---
 if st.button("🔍 執行策略掃描"):
@@ -328,12 +330,7 @@ if st.button("🔍 執行策略掃描"):
                     is_match = True; match_reason = "四線合一 + 爆量"; details = f"量能 {round(vol_ratio,1)}倍"
             
             elif "停損" in strategy_mode:
-                # ★ 優化邏輯：提高量大股的門檻，或針對邊緣股從嚴認定
-                # 將門檻從 10,000 提高到 15,000，讓像昇貿這種 9千~1萬張的股票，
-                # 強制歸類為 "中小型股"，需守 10日線。
-                threshold_sheets = 15000 
-                
-                # 1. 優先判斷：空頭走勢 (跌破月線 > 3天) - 這是最嚴重的，不分量大量小
+                # ★ 1. 優先判斷：空頭走勢 (跌破月線 > 3天)
                 last_3_days_bearish_monthly = True
                 for k in range(1, 4):
                     if df['close'].iloc[-k] >= df['ma20'].iloc[-k]:
@@ -345,20 +342,23 @@ if st.button("🔍 執行策略掃描"):
                      match_reason = "☠️ 空頭走勢 (連破月線 > 3日)"
                      details = f"趨勢已轉空 | 連續3日收盤 < 月線"
 
-                # 2. 次要判斷：破線警示
+                # ★ 2. 次要判斷：破線警示
                 else:
+                    # 提高門檻至 15,000 以抓到邊緣股
+                    threshold_sheets = 15000 
+                    
                     if avg_vol_60_sheets < threshold_sheets:
-                        # 量小/中型股 (< 1.5萬張)：嚴格守 10日線
+                        # 量小/中型股：嚴格守 10日線
                         if price < ma10:
                             is_match = True
                             match_reason = f"⚠️ 破 10日線 (均量{avg_vol_60_sheets}張)"
-                            details = f"中小型股防守轉弱 | 收盤 {price} < 10MA {round(ma10, 2)}"
+                            details = f"中小型股轉弱 | 收盤 {price} < 10MA {round(ma10, 2)}"
                     else:
-                        # 超級熱門股 (> 1.5萬張)：才允許守 月線
+                        # 超級熱門股：才允許守 月線
                         if price < ma20:
                             is_match = True
                             match_reason = f"⚠️ 破 月線 (熱門股)"
-                            details = f"熱門股波段轉弱 | 收盤 {price} < 20MA {round(ma20, 2)}"
+                            details = f"熱門股轉弱 | 收盤 {price} < 20MA {round(ma20, 2)}"
 
             elif "價值" in strategy_mode:
                 try:
@@ -388,6 +388,9 @@ if st.button("🔍 執行策略掃描"):
                     col_main, col_news = st.columns([7, 3])
                     
                     with col_main:
+                        # ★ 修正：補回 "目標價" (對於賣訊策略，顯示為下檔支撐/回補目標)
+                        target_label = '🎯 回補目標' if '停損' in strategy_mode else '🎯 目標價'
+                        
                         st.markdown(f"""
                         <div style="padding: 10px; background-color: #f0f2f6; border-radius: 5px; margin-bottom: 10px;">
                             <span style="font-size: 1.1em; font-weight: bold; color: #0e1117;">
@@ -395,7 +398,8 @@ if st.button("🔍 執行策略掃描"):
                             </span>
                             <hr style="margin: 8px 0;">
                             <span style="color: {'green' if '停損' not in strategy_mode else 'gray'}; font-weight: bold;">💰 {'建議買入' if '停損' not in strategy_mode else '參考價'}: {round(setup['buy_price'], 2)}</span> &nbsp;|&nbsp; 
-                            <span style="color: red;">🛑 {'停損價' if '停損' not in strategy_mode else '破線警示價'}: {round(setup['stop_loss'], 2)}</span> <br>
+                            <span style="color: red;">🛑 {'停損價' if '停損' not in strategy_mode else '破線警示價'}: {round(setup['stop_loss'], 2)}</span> &nbsp;|&nbsp; 
+                            <span style="color: blue;">{target_label}: {round(setup['take_profit'], 2)}</span> <br>
                             <small>{setup['risk_reward']}</small>
                         </div>
                         """, unsafe_allow_html=True)
@@ -423,4 +427,3 @@ if st.button("🔍 執行策略掃描"):
     if error_msgs: error_log.write(error_msgs)
     status_text.empty()
     if not found_any: st.warning(f"在「{strategy_mode}」模式下，無符合標的。")
-
